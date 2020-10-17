@@ -22,14 +22,16 @@ Create a file "credentials.h" containing the following data
    platformio.ini is available incl. OTA support and local serial debugging (using serial port)
 
 ## cli   
-   arduino-cli lib install MySensors
-   arduino-cli compile -v --fqbn esp8266:esp8266:d1_mini /path/to/main.cpp (should be then better be renamed to *.ino)
+   `arduino-cli lib install MySensors`   
+   `arduino-cli compile -v --fqbn esp8266:esp8266:d1_mini /path/to/main.cpp (should be then better be renamed to *.ino)`
 
 ### OTA: 
         python espota.py -d  -i 192.168.2.221 -f /path/to/bin/GatewayWemosD1Mini.ino.bin
    Serial: 
-        ls /dev/cu.*
-        ./esptool -vv -cd nodemcu -cb 115200 -cp /dev/cu.usbserial-1420 -ca 0x00000 -cf ./GatewayWemosD1Mini.ino.bin
+```
+      ls /dev/cu.*   
+      ./esptool -vv -cd nodemcu -cb 115200 -cp /dev/cu.usbserial-1420 -ca 0x00000 -cf ./GatewayWemosD1Mini.ino.bin
+```
 
 ## description 
    The GatewayWemosD1Mini sends data received from sensors to the WiFi link.
