@@ -86,5 +86,5 @@ Create a file "credentials.h" containing the following data
 ```
 
 ## javascript hints
-   https://stackoverflow.com/a/2931108/10590793
-   https://stackoverflow.com/questions/1583123/circular-buffer-in-javascript
+*   https://stackoverflow.com/a/2931108/10590793
+*   https://stackoverflow.com/questions/1583123/circular-buffer-in-javascript
