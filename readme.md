@@ -34,21 +34,23 @@ Create a file "credentials.h" containing the following data
 ```
 
 ## description 
-   The GatewayWemosD1Mini sends data received from sensors to the WiFi link.
-   The gateway also accepts input on ethernet interface, which is then sent out to the radio network.
+   The GatewayWemosD1Mini sends data received from sensors to the WiFi link.   
+   The gateway also accepts input on ethernet interface, which is then sent out to the radio network.   
 
    LED purposes:
-   - To use the feature, uncomment any of the MY_DEFAULT_xx_LED_PINs in your sketch, only the LEDs that is defined is used.
-   - RX (green) - blink fast on radio message recieved. In inclusion mode will blink fast only on presentation recieved
-   - TX (yellow) - blink fast on radio message transmitted. In inclusion mode will blink slowly
-   - ERR (red) - fast blink on error during transmission error or recieve crc error
+   * To use the feature, uncomment any of the MY_DEFAULT_xx_LED_PINs in your sketch, only the LEDs that is defined is used.
+   * RX (green) - blink fast on radio message recieved. In inclusion mode will blink fast only on presentation recieved
+   * TX (yellow) - blink fast on radio message transmitted. In inclusion mode will blink slowly
+   * ERR (red) - fast blink on error during transmission error or recieve crc error
 
-   for wiring instructions, see
-   https://www.mysensors.org/build/esp8266_gateway
-   https://www.mysensors.org/build/advanced_gateway
-   https://github.com/mysensors/MySensors/blob/development/examples/GatewayESP8266OTA/GatewayESP8266OTA.ino
-   https://github.com/mysensors/MySensors/blob/master/examples/GatewayESP8266/GatewayESP8266.ino
-   https://www.wemos.cc/product/d1-mini.html
+###   for wiring instructions, see    
+*   https://www.mysensors.org/build/esp8266_gateway
+*   https://www.mysensors.org/build/advanced_gateway
+*   https://github.com/mysensors/MySensors/blob/development/examples/GatewayESP8266OTA/GatewayESP8266OTA.ino
+*   https://github.com/mysensors/MySensors/blob/master/examples/GatewayESP8266/GatewayESP8266.ino
+*   https://www.wemos.cc/product/d1-mini.html
+
+### connecting the radio
 
 |   nRF24L01+  | ESP8266     |  Wemos D1 mini    | barebone | 
 | ----  | ---- | ---- | ---- |  
