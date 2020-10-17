@@ -7,9 +7,9 @@ MySensors Gateway with logging using
 
 <img src="screenshot.png" width="500">    
 
-## config / cfredentials
+## config / credentials
 
-You have to create a file "credentials.h" containing the following data
+Create a file "credentials.h" containing the following data
 ```
    #define MY_WIFI_SSID "ssid"
    #define MY_WIFI_PASSWORD "******"
@@ -19,14 +19,14 @@ You have to create a file "credentials.h" containing the following data
 
 ## platformio
 
-   platformio.ini is available 
+   platformio.ini is available incl. OTA support and local serial debugging (using serial port)
 
 ## cli   
    arduino-cli lib install MySensors
-   arduino-cli compile -v --fqbn esp8266:esp8266:d1_mini ~/Arduino/wemos/GatewayWemosD1Mini/GatewayWemosD1Mini.ino
+   arduino-cli compile -v --fqbn esp8266:esp8266:d1_mini /path/to/main.cpp (should be then better be renamed to *.ino)
 
 ### OTA: 
-        python espota.py -d  -i 192.168.2.221 -f /$path2bin/GatewayWemosD1Mini.ino.bin
+        python espota.py -d  -i 192.168.2.221 -f /path/to/bin/GatewayWemosD1Mini.ino.bin
    Serial: 
         ls /dev/cu.*
         ./esptool -vv -cd nodemcu -cb 115200 -cp /dev/cu.usbserial-1420 -ca 0x00000 -cf ./GatewayWemosD1Mini.ino.bin
@@ -81,6 +81,6 @@ You have to create a file "credentials.h" containing the following data
    #define MY_DEFAULT_TX_LED_PIN  D1  // Transmit led pin (Green)
 ```
 
-## javascript
+## javascript hints
    https://stackoverflow.com/a/2931108/10590793
    https://stackoverflow.com/questions/1583123/circular-buffer-in-javascript
