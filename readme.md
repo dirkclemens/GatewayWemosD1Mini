@@ -50,20 +50,20 @@ Create a file "credentials.h" containing the following data
    https://github.com/mysensors/MySensors/blob/master/examples/GatewayESP8266/GatewayESP8266.ino
    https://www.wemos.cc/product/d1-mini.html
 
-   nRF24L01+  ESP8266     Wemos D1 mini   barebone
-   VCC        VCC         VCC
-   CE         GPIO4       D2
-   CSN/CS     GPIO15      D8              via 10K pulldown resistor to GND
-   SCK        GPIO14      D5
-   MISO       GPIO12      D6
-   MOSI       GPIO13      D7
-   GND        GND         GND
-              CH_PD                       via 10K resistor to VCC
-              GPIO2       D4              via 10K resistor to VCC
-              GPIO0       D3              via 10K resistor to VCC, and via switch to GND ('bootload switch')
-
-              GPIO16      D0              free
-              GPIO5       D1              free
+|   nRF24L01+  | ESP8266     |  Wemos D1 mini    | barebone | 
+| ----  | ---- | ---- | ---- |  
+|   VCC        |  VCC         |  VCC |  | 
+|   CE         |  GPIO4       |  D2 |  | 
+|   CSN/CS     |  GPIO15      |  D8    |            via 10K pulldown resistor to GND | 
+|   SCK        |  GPIO14      |  D5 |  | 
+|   MISO       |  GPIO12      |  D6 |  | 
+|   MOSI       |  GPIO13      |  D7 |  | 
+|   GND        |  GND         |  GND |  | 
+|              |  CH_PD       |         |           via 10K resistor to VCC | 
+|              |  GPIO2       |  D4        |        via 10K resistor to VCC | 
+|              |  GPIO0       |  D3           |     via 10K resistor to VCC, and via switch to GND ('bootload switch') | 
+|              |  GPIO16      |  D0              |  free | 
+|              |  GPIO5       |  D1               | free | 
 
    Inclusion mode button:
    - Connect GPIO5 via switch to GND ('inclusion switch')
