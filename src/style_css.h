@@ -278,6 +278,47 @@ input[type="text"] {
 .error {
     color: red;
 }
+/* Tooltip container */
+.tooltip {
+    position: relative;
+    display: inline-block;
+}
+.tooltip .tooltiptext {
+    visibility: hidden;
+    /* width: 60%; */
+    background-color: #555;
+    color: #fff;
+    text-align: center;
+    font-family: monaco;
+    font-size: 0.8em;
+    padding: 5px;
+    border-radius: 6px;
+
+    /* Position the tooltip text */
+    position: fixed;
+    z-index: 1;
+    top: 120px;
+    right: 25%;
+    /* margin-left: -60px; */
+
+    /* Fade in tooltip */
+    opacity: 0;
+    transition: opacity 0.3s;
+}
+.tooltip .tooltiptext::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    margin-left: -5px;
+    border-width: 5px;
+    border-style: solid;
+    border-color: #555 transparent transparent transparent;
+}
+.tooltip:hover .tooltiptext {
+    visibility: visible;
+    opacity: 1;
+}
 @media only screen and (max-width: 768px) {
     .row {
         width: 90%;

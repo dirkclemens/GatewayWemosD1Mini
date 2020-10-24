@@ -12,6 +12,7 @@
 #include "index.h"
 #include "style_css.h"
 #include "reboot.h"
+// #include "svg_gz.h"
 
 #include <ArduinoOTA.h>
 #include <ESP8266WiFi.h>
@@ -60,6 +61,7 @@ const char * const RST_REASONS[] = {
   "REASON_DEEP_SLEEP_AWAKE",
   "REASON_EXT_SYS_RST"
 };
+// https://arduino-esp8266.readthedocs.io/en/latest/libraries.html#esp-specific-apis
 void send_Status(AsyncWebServerRequest *request)
 {
 	uint32_t realSize = ESP.getFlashChipRealSize();
@@ -102,24 +104,44 @@ void send_Status(AsyncWebServerRequest *request)
 	resp->printf("               rssi: %s\n", String(WiFi.RSSI()).c_str());
 	resp->println();
 
-	// FSInfo fs_info;
-	// if (SPIFFS.info(fs_info))
-	// {
-	// 	resp->printf("  FS totalBytes: %d bytes\n", fs_info.totalBytes);
-	// 	resp->printf("  FS  usedBytes: %d bytes\n", fs_info.usedBytes);
-	// 	resp->printf("  FS  blockSize: %d bytes\n", fs_info.blockSize);
-	// 	resp->printf("  FS   pageSize: %d bytes\n", fs_info.pageSize);
-	// 	resp->printf("   maxOpenFiles: %d \n", fs_info.maxOpenFiles);
-	// 	resp->printf("  maxPathLength: %d \n", fs_info.maxPathLength);
-	// 	resp->println();
-	// }
+	// https://arduino-esp8266.readthedocs.io/en/latest/filesystem.html#file-object
+	boolean fsOk = SPIFFS.begin();
+	if (fsOk) 
+	{	
+		resp->print ("Filesystem\n-----------------------------\n");
+		FSInfo fs_info;
+		if (SPIFFS.info(fs_info))
+		{
+			resp->printf("      FS totalBytes: %d bytes\n", fs_info.totalBytes);
+			resp->printf("      FS  usedBytes: %d bytes\n", fs_info.usedBytes);
+			resp->printf("      FS  blockSize: %d bytes\n", fs_info.blockSize);
+			resp->printf("      FS   pageSize: %d bytes\n", fs_info.pageSize);
+			resp->printf("       maxOpenFiles: %d \n", fs_info.maxOpenFiles);
+			resp->printf("      maxPathLength: %d \n", fs_info.maxPathLength);
+			resp->println();
+		}
 
-	// resp->print ("Files\n-----------------------------\n");
-	// Dir dir = SPIFFS.openDir("/");
-	// while (dir.next()) {    
-	// 	resp->printf("FS File: %s, size: %s\n",  dir.fileName().c_str(), formatBytes(dir.fileSize()).c_str());
-	// }
-	// resp->println();
+		resp->print ("Files\n-----------------------------\n");
+		Dir dir = SPIFFS.openDir("/");
+		while (dir.next()) {    
+			resp->printf("FS File: %s, size: %s\n",  dir.fileName().c_str(), formatBytes(dir.fileSize()).c_str());
+		}
+		resp->println();
+
+		resp->print ("Bootlog\n-----------------------------\n");
+		File file = SPIFFS.open("/bootlog.txt", "r");
+		while (file.available()) {
+			// resp->printf("%s\n", file.readStringUntil('\n').c_str());
+			resp->printf("%s\n", file.readString().c_str());
+		}
+		// bootloglines += String(file.size()) + " Bytes";
+		file.close();
+	} 
+	else
+	{
+		resp->printf("error opening SPIFFS!\n");
+	}
+	SPIFFS.end();
 
 	// resp->print ("config.json\n-----------------------------\n");
 	// File configFile = SPIFFS.open("/config.json", "r");
@@ -161,9 +183,60 @@ void setup_WebServer()
 		request->send(response);
 	});
 
+	// server.on("/red.svg", [](AsyncWebServerRequest *request) {
+	// 	AsyncWebServerResponse *response = request->beginResponse_P(200, "image/svg", red_svg_gz, sizeof(red_svg_gz));
+	// 	response->addHeader("Content-Encoding", "gzip");
+	// 	request->send(response);
+	// });
+	// server.on("/green.svg", [](AsyncWebServerRequest *request) {
+	// 	AsyncWebServerResponse *response = request->beginResponse_P(200, "image/svg", green_svg_gz, sizeof(green_svg_gz));
+	// 	response->addHeader("Content-Encoding", "gzip");
+	// 	request->send(response);
+	// });
+	// server.on("/yellow.svg", [](AsyncWebServerRequest *request) {
+	// 	AsyncWebServerResponse *response = request->beginResponse_P(200, "image/svg", yellow_svg_gz, sizeof(yellow_svg_gz));
+	// 	response->addHeader("Content-Encoding", "gzip");
+	// 	request->send(response);
+	// });
+
 	server.on("/style.css", [](AsyncWebServerRequest *request){
 		request->send_P(200, "text/css", style_css, nullptr);
 	});
+
+	server.on("/bootlog.txt", [](AsyncWebServerRequest *request){
+		AsyncResponseStream *resp = request->beginResponseStream("text/plain");
+		dbgprintln(ico_info, "start reading from bootlog.txt");
+		boolean fsOk = SPIFFS.begin();
+		if (fsOk) 
+		{	
+			File file = SPIFFS.open("/bootlog.txt", "r");
+			char buffer[64] = {'\0'};
+			while (file.available()) {
+				// resp->printf("%s\n", file.readStringUntil('\n').c_str());
+				snprintf(buffer, "%s", file.readString().c_str());
+				dbgprintf(ico_info, "%s", buffer);
+				resp->printf("%s\n", buffer);
+				buffer[0] = '\0';
+			}			
+			file.close();			
+		}
+		SPIFFS.end();
+		dbgprintln(ico_info, "reading from bootlog.txt - done.");
+		request->send(resp);
+	});
+
+	server.on("/wipefs", [](AsyncWebServerRequest *request){
+		dbgprintln(ico_info, "removing bootlog.txt");
+		boolean fsOk = SPIFFS.begin();
+		if (fsOk) 
+		{	
+			SPIFFS.remove("/bootlog.txt");
+		}
+		SPIFFS.end();
+		dbgprintln(ico_info, "done.");
+		request->send_P(200, "text/html", index_html, processor);
+	});
+
 
 	server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
 		AsyncWebServerResponse *response = request->beginResponse_P(200, "text/html", index_html, nullptr);

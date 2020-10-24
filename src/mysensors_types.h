@@ -10,3 +10,43 @@ const char *mysSetReqCodes[]        = {"V_TEMP", "V_HUM", "V_STATUS", "V_PERCENT
 const char *mysSetReqUnits[]        = {"°C", "%", " ", "%", "mB", "forecast", "rain", "rainrate", "wind", "gust", "°", " ", "kg", "m", "ohm", " ", " ", "W", "kwh", " ", " ", " ", " ", "lux", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", "m", "m³", "  ", " ", "V", "A", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", "ph ", "mV", "μS/cm", "var", "va", " "};
 const char *mysInternalCodes[]      = {"I_BATTERY_LEVEL", "I_TIME", "I_VERSION", "I_ID_REQUEST", "I_ID_RESPONSE", "I_INCLUSION_MODE", "I_CONFIG", "I_FIND_PARENT_REQUEST", "I_FIND_PARENT_RESPONSE", "I_LOG_MESSAGE", "I_CHILDREN", "I_SKETCH_NAME", "I_SKETCH_VERSION", "I_REBOOT", "I_GATEWAY_READY", "I_SIGNING_PRESENTATION", "I_NONCE_REQUEST", "I_NONCE_RESPONSE", "I_HEARTBEAT_REQUEST", "I_PRESENTATION", "I_DISCOVER_REQUEST", "I_DISCOVER_RESPONSE", "I_HEARTBEAT_RESPONSE", "I_LOCKED ", "I_PING", "I_PONG", "I_REGISTRATION_REQUEST", "I_REGISTRATION_RESPONSE", "I_DEBUG", "I_SIGNAL_REPORT_REQUEST", "I_SIGNAL_REPORT_REVERSE", "I_SIGNAL_REPORT_RESPONSE", "I_PRE_SLEEP_NOTIFICATION", "I_POST_SLEEP_NOTIFICATION"};
 const char *mysStreamCodes[]        = {"ST_FIRMWARE_CONFIG_REQUEST", "ST_FIRMWARE_CONFIG_RESPONSE", "ST_FIRMWARE_REQUEST", "ST_FIRMWARE_RESPONSE", "ST_SOUND", "ST_IMAGE", "ST_FIRMWARE_CONFIRM", "ST_FIRMWARE_RESPONSE_RLE"};
+
+
+const char *mysIndicationErrorCodes0[] = {
+    "Sent a message.", 
+    "Received a message.",
+    "Gateway transmit message.", 
+    "Gateway receive message.",
+    "Start finding parent node.", 
+    "Found parent node.",
+    "Request node ID.", 
+    "Got a node ID.", 
+    "Check uplink", 
+    "Request node registration.", 
+    "Got registration response.", 
+    "Rebooting node.", 
+    "Presenting node to gateway.", 
+    "Clear routing table requested.", 
+    "Node goes to sleep.", 
+    "Node just woke from sleep.", 
+    "Start of OTA firmware update process.", 
+    "Received a piece of firmware data.", 
+    "Received wrong piece of firmware data."};
+
+const char *mysIndicationErrorCodes100[] = {
+	"HW initialization error", 
+	"Failed to transmit message.", 
+	"Transport failure.", 
+	"MySensors transport hardware (radio) init failure.", 
+	"Failed to find parent node.", 
+	"Failed to receive node ID.", 
+	"Failed to check uplink", 
+	"Error signing.", 
+	"Invalid message length.", 
+	"Protocol version mismatch.", 
+	"Network full. All node ID's are taken.", 
+	"Gateway transport hardware init failure.", 
+	"Node is locked.", 
+	"Firmware update flash initialisation failure.", 
+	"Firmware update timeout.", 
+	"Firmware update checksum mismatch."};

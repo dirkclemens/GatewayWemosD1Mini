@@ -18,7 +18,7 @@ char *runtime()
 	previousMillis = currentMillis;
 	uint32_t sek{(0xFFFFFFFF / 1000) * rolloverCounter + (currentMillis / 1000)};
 	static char buf[20];
-	snprintf(buf, sizeof(buf), "%d day%s %02d:%02d:%02d", sek / 86400, sek < 86400 || sek >= 172800 ? "e" : "", sek / 3600 % 24, sek / 60 % 60, sek % 60);
+	snprintf(buf, sizeof(buf), "%d day%s %02d:%02d:%02d", sek / 86400, sek < 86400 || sek >= 172800 ? "s" : "", sek / 3600 % 24, sek / 60 % 60, sek % 60);
 	return buf;
 }
 

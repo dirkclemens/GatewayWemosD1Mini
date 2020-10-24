@@ -30,6 +30,7 @@
 // Set the hostname for the WiFi Client. This is the hostname
 // it will pass to the DHCP server if not static.
 #define MY_HOSTNAME "GatewayWemosD1Mini"
+#define SKETCH_NAME "GatewayWemosD1Mini"
 // #define MY_ESP8266_HOSTNAME "MYSD1MiniGatewayOTA"
 
 // Enable MY_IP_ADDRESS here if you want a static ip address (no DHCP)
@@ -70,6 +71,18 @@
 // #define MY_DEFAULT_ERR_LED_PIN 5
 #define MY_DEFAULT_RX_LED_PIN D4
 // #define MY_DEFAULT_TX_LED_PIN D0
+#define MY_INDICATION_HANDLER
+
+unsigned long gatewayTxMessage = 0;
+unsigned long gatewayRxMessage = 0;
+unsigned long sensorTxMessage = 0;
+unsigned long sensorRxMessage = 0;
+unsigned long indicatorTxErrors = 0;
+
+// because SPIFFS is deprecated
+// #include <LittleFS.h>
+// #define SPIFFS LittleFS
+#include "FS.h"
 
 // #ifdef MY_USE_UDP
 // #include <WiFiUdp.h>
@@ -89,6 +102,15 @@
 #endif // PUSHOVER
 boolean alertSent = false;
 
+////////////////////////////////////////////////////////////////////////
+// Child declarations
+// wichtig für fhem https://fhem.de/commandref.html#MYSENSORS_DEVICE
+// https://tecdox.adcore.de/edit/wiki/iot/mysensors-sensoren
+#define CHILD_ID_GENERAL 0
+#define CHILD_ID_UPTIME 197
+
+////////////////////////////////////////////////////////////////////////
+// includes
 #include <MySensors.h>
 
 /** serial or telnet output **/
@@ -97,14 +119,29 @@ WiFiServer telnetServer(TELNET_PORT);
 WiFiClient telnetClient;
 #endif
 
-static unsigned long interval 		= 1000;
+// 	interval for updating events / web ui
+static unsigned long interval = 1000; // every second
 static unsigned long prev_time;
-unsigned long cpuLastMicros 		= 0; 	// cpu utilisation
-unsigned long avgCpuDelta 			= 0;	// cpu utilisation
+
+// 	interval for sending messages to server
+static unsigned long gw_send_interval = 1000 * 60 * 15; // every 15 min
+static unsigned long gw_send_prev_time;
+
+unsigned long cpuLastMicros = 0; // cpu utilisation
+unsigned long avgCpuDelta = 0;	 // cpu utilisation
+
+// /////// /////////////////////////////////////////////////////////////////////
+// Initialize message types
+// https://www.mysensors.org/download/serial_api_20#variable-types
+// https://github.com/mysensors/MySensors/blob/development/core/MyMessage.h
+MyMessage msgGeneral(CHILD_ID_GENERAL, V_VAR1);
+MyMessage msgUptime(CHILD_ID_UPTIME, V_TEXT);
+
 /* 
  * 	https://github.com/dragondaud/SolarGuardn/blob/master/SolarGuardn.ino
  */
-template <typename T> void telnetOut(const T x)
+template <typename T>
+void telnetOut(const T x)
 {
 	Serial.print(x);
 #ifdef TELNET
@@ -127,7 +164,8 @@ void telnetOutLN()
 /* 
  *
  */
-template <typename T> void telnetOutLN(const T x)
+template <typename T>
+void telnetOutLN(const T x)
 {
 	telnetOut(x);
 	telnetOut(FPSTR(EOL));
@@ -149,14 +187,15 @@ void loop_Telnet(void)
 			}
 			telnetClient = telnetServer.available();
 
-			char c = telnetClient.read(); 
-			if (c == 'c') {
-					telnetClient.println("bye bye.\r\n");
-					telnetClient.flush();
-					telnetClient.stop();
-			
-			}else
-			{	 
+			char c = telnetClient.read();
+			if (c == 'c')
+			{
+				telnetClient.println("bye bye.\r\n");
+				telnetClient.flush();
+				telnetClient.stop();
+			}
+			else
+			{
 				telnetClient.println(c);
 			}
 
@@ -177,6 +216,37 @@ void loop_Telnet(void)
 /*
  *
  */
+void logBootTime()
+{
+	dbgprintln(ico_info, "Updating bootlog");
+	boolean fsOk = SPIFFS.begin();
+	if (fsOk)
+	{
+		File file = SPIFFS.open("/bootlog.txt", "a");
+		if (!file || file.isDirectory())
+		{
+			dbgprintln(ico_error, "Error: Unable to open boot log in SPIFFS");
+		}
+		else
+		{
+			char buffer[64] = {'\0'};
+			snprintf(buffer, "%s - %s", getBootTime().c_str(), ESP.getResetReason().c_str());
+			dbgprintf(ico_info, "adding to bootlog.txt: %s", buffer);
+			file.println(buffer); // add entry to log file
+			buffer[0] = '\0';
+			file.close();
+		}
+		SPIFFS.end();
+	}
+	else
+	{
+		dbgprintln(ico_error, "error opening SPIFFS!");
+	}
+}
+
+/*
+ *
+ */
 void setup_OTA()
 {
 #ifdef OTA
@@ -184,7 +254,8 @@ void setup_OTA()
 
 	ArduinoOTA.onStart([]() {
 		// Clean SPIFFS
-		// SPIFFS.end();
+		// https://arduino-esp8266.readthedocs.io/en/latest/filesystem.html#end
+		SPIFFS.end();
 		dbgprintln(ico_info, "Start");
 		send_Event("[OTA] Start", "debug");
 	});
@@ -324,25 +395,30 @@ void getMessagePayload(char *payload, MyMessage message)
 void updateWebStats()
 {
 	char timestamp[21] = {'\0'};
+
 	getCurrentTimeString(timestamp, "%Y-%m-%d %H:%M:%S");
+	// https://arduino-esp8266.readthedocs.io/en/latest/libraries.html#esp-specific-apis
 	String page = "<table><thead><tr><th>&nbsp;</th><th>&nbsp;</th></thead><tr><td>gateway started at</td><td>" +
 				  getBootTime() +
 				  "</td></tr><tr><td>hostname</td><td>" + String(WiFi.hostname()) + "</td></tr>" +
 				  "<tr><td>current time</td><td>" + String(timestamp) + "</td></tr>" +
 				  "<tr><td>runtime</td><td>" + runtime() + "</td></tr>" +
-				//   "<tr><td>uptime</td><td>" + uptime() + "</td></tr>" +
+				  //   "<tr><td>uptime</td><td>" + uptime() + "</td></tr>" +
 				  "<tr><td>build</td><td>" + (String)__DATE__ + " " + (String)__TIME__ + "</td></tr>" +
 				  "<tr><td>sw version</td><td>" + String(__SWVERSION__) + "</td></tr>" +
 				  "<tr><td>free heap</td><td>" + formatBytes(ESP.getFreeHeap()) + "</td></tr>" +
-				  "<tr><td>sketch space</td><td>" + formatBytes(ESP.getFreeSketchSpace()) + "</td></tr>" +
-				  "<tr><td>reset reason</td><td>" + ESP.getResetReason() + "</td></tr>" +
-				//   "<tr><td>local ip</td><td>" + WiFi.localIP().toString() + "</td></tr>" +
-				//   "<tr><td>ssid</td><td>" + WiFi.SSID() + "</td></tr>" +
-				//   "<tr><td>mac address</td><td>" + WiFi.macAddress() + "</td></tr>" +
+				  "<tr><td>flash space</td><td>" + formatBytes(ESP.getFlashChipRealSize()) + "</td></tr>" +
+				  "<tr><td>used sketch space</td><td>" + formatBytes(ESP.getSketchSize()) + "</td></tr>" +
+				  "<tr><td>free sketch space</td><td>" + formatBytes(ESP.getFreeSketchSpace()) + "</td></tr>" +
+				  //   "<tr><td>file system</td><td>" + String(fs_info.usedBytes*100.0/fs_info.totalBytes) + "%</td></tr>" +
 				  "<tr><td>rssi</td><td>" + String(WiFi.RSSI()) + "dB</td></tr>" +
+				  "<tr><td>local ip</td><td>" + WiFi.localIP().toString() + "</td></tr>" +
+				  "<tr><td>ssid</td><td>" + WiFi.SSID() + "</td></tr>" +
+				  "<tr><td>mac address</td><td>" + WiFi.macAddress() + "</td></tr>" +
 #ifdef MY_CORE_ONLY
 				  "<tr><td>MY_CORE_ONLY</td><td>TRUE</td></tr>" +
 #endif
+				  "<tr><td><a href=\"/bootlog.txt\">reset reason</a></td><td>" + ESP.getResetReason() + "</td></tr>" +
 				  "</table>" +
 				  "</div></body></html>";
 	send_Event(page.c_str(), "info");
@@ -379,7 +455,7 @@ void receive(const MyMessage &message)
 		strcpy(msgtype, mysPresenationCodes[message.type]);
 		// if (message.sensor == 255)
 		// {
-			getMessagePayload(payload, message);
+		getMessagePayload(payload, message);
 		// }
 		break;
 
@@ -450,6 +526,39 @@ void receive(const MyMessage &message)
 	send_Event(webjson, "messagesjson");
 	webjson[0] = {'\0'};
 #endif
+}
+
+/*
+ *
+ */
+int counter = 0;
+void loop_Wifi()
+{
+	dbgprintln(ico_info, "loop_Wifi()");
+#ifdef MY_CORE_ONLY
+	WiFi.begin(MY_WIFI_SSID, MY_WIFI_PASSWORD);
+#else
+	WiFi.begin();
+#endif
+	delay(500);
+	// WiFi.printDiag(Serial);
+	if (++counter > 50)
+	{
+		ESP.restart();
+	}
+}
+
+/* 
+ *
+ */
+unsigned long getCpuDelta()
+{
+	unsigned long thisMicros, delta;
+	thisMicros = micros();
+	delta = thisMicros - cpuLastMicros;
+	cpuLastMicros = thisMicros;
+	// dbgprintf(ico_info, "cpu load: %lu \u03BCs", delta);
+	return delta;
 }
 
 #ifdef MY_CORE_ONLY
@@ -534,51 +643,18 @@ void pushover(const char *message, const char *title = "MySensors Gateway")
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
-void setup()
+//
+void before()
 {
-#ifdef MY_DEBUG
-	Serial.begin(9600);
-	while (!Serial)
-	{
-	} // Wait
-#endif
-
-	cpuLastMicros = micros();
-
- #ifdef MY_CORE_ONLY
-	setup_wifi();
-#endif
-
-	setBootTime();
-
-#ifdef TELNET
-	telnetServer.begin();
-	//telnetServer.setNoDelay(true); // drops chars if set true
-#endif // TELNET
-
-#ifdef NTP
-	configTime(TZ_INFO, NTP_SERVER[0], NTP_SERVER[1], NTP_SERVER[2]); // check TZ.h, find your location
-#endif																  // NTP
-
-#ifdef WWW
-	setup_WebServer();
-	// ringBufferInit();
-#endif // WWW
-
-#ifdef OTA
-	setup_OTA();
-#endif // OTA
-
-	if (WiFi.status() == WL_CONNECTED)
-	{
-		// pushover("Gateway successfully started");
-	}
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
+//
 void presentation()
 {
-	sendSketchInfo("GatewayWemosD1Mini", "1.0.00");
+	sendSketchInfo(SKETCH_NAME, __DATE__ " " __TIME__);
+	wait(200);
+	present(CHILD_ID_UPTIME, S_INFO, "uptime");
 }
 
 void loop_NTP()
@@ -598,42 +674,151 @@ void loop_NTP()
 	}
 }
 
-int counter = 0;
-void loop_Wifi()
+//////////////////////////////////////////////////////////////////////////////////////////////////
+//	#define MY_INDICATION_HANDLER is needed
+//
+void indication(const indication_t indicator)
 {
-	dbgprintln(ico_info, "loop_Wifi()");
-#ifdef MY_CORE_ONLY
-	WiFi.begin(MY_WIFI_SSID, MY_WIFI_PASSWORD);
-#else
-	WiFi.begin();
-#endif
-	delay(500);
-	// WiFi.printDiag(Serial);
-	if (++counter > 50)
+	switch (indicator)
 	{
-		ESP.restart();
-	}
-}
+	case INDICATION_GW_TX:
+		gatewayTxMessage++;
+		// send_Event("<img src=\"green.svg\" />", "led");
+		break;
 
-/* 
- *
- */
-unsigned long getCpuDelta()
-{
-	unsigned long thisMicros, delta;
-	thisMicros = micros();
-	delta = thisMicros - cpuLastMicros;
-	cpuLastMicros = thisMicros;
-	// dbgprintf(ico_info, "cpu load: %lu \u03BCs", delta);
-	return delta;
+	case INDICATION_GW_RX:
+		gatewayRxMessage++;
+		// send_Event("<img src=\"red.svg\" />", "led");
+		break;
+
+	case INDICATION_TX:
+		sensorTxMessage++;
+		// send_Event("<img src=\"green.svg\" />", "led");
+		break;
+
+	case INDICATION_RX:
+		sensorRxMessage++;
+		// send_Event("<img src=\"red.svg\" />", "led");
+		break;
+
+	default:
+		// send_Event("<img src=\"yellow.svg\" />", "led");
+		break;
+	};
+
+	static char mysIndication[32]; // = {'\0'};
+	if (indicator > 3 && indicator < 19)
+	{
+		strcpy(mysIndication, mysIndicationErrorCodes0[indicator]);
+	}
+	if (indicator > 100)
+	{
+		strcpy(mysIndication, mysIndicationErrorCodes100[indicator - 101]);
+		indicatorTxErrors++;
+	}
+
+	char msgbuf[128] = {'\0'};
+	if (snprintf(msgbuf, sizeof(msgbuf),
+				 "%s<br />gateway: rx: %lu - tx: %lu <br />sensors: rx: %lu - tx: %lu <br />errors: %lu",
+				 mysIndication,
+				 // indicator,
+				 gatewayRxMessage,
+				 gatewayTxMessage,
+				 sensorRxMessage,
+				 sensorTxMessage,
+				 indicatorTxErrors) < 0)
+	{
+		strcpy(msgbuf, "<div class=\"error\">error</div>");
+	}
+	send_Event(msgbuf, "indicator");
+	// dbgprintln(ico_info, msgbuf);
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////
+//
+void setup()
+{
+#ifdef MY_DEBUG
+	Serial.begin(9600);
+	while (!Serial)
+	{
+	} // Wait
+#endif
+
+	cpuLastMicros = micros();
+
+#ifdef MY_CORE_ONLY
+	setup_wifi();
+#endif
+
+#ifdef TELNET
+	telnetServer.begin();
+	//telnetServer.setNoDelay(true); // drops chars if set true
+#endif // TELNET
+
+#ifdef NTP
+	configTime(TZ_INFO, NTP_SERVER[0], NTP_SERVER[1], NTP_SERVER[2]); // check TZ.h, find your location
+#endif																  // NTP
+
+#ifdef WWW
+	setup_WebServer();
+#endif // WWW
+
+#ifdef OTA
+	setup_OTA();
+#endif // OTA
+
+	if (WiFi.status() == WL_CONNECTED)
+	{
+		// pushover("Gateway successfully started");
+	}
+
+	// call not before time was set to local time
+	setBootTime();
+	// and write it to SPIFFS
+	logBootTime();
+}
+
+/*
+ *
+ */
+int day = -1;
+boolean checkMidnight()
+{
+	struct tm tm;
+	time_t now = time(&now);
+	localtime_r(&now, &tm);
+	char stoday[2] = "00";
+	strftime(stoday, sizeof(stoday), "%d", &tm); // http://www.cplusplus.com/reference/ctime/strftime/
+	int today = atoi(stoday);
+	boolean result = false;
+	if (day == -1)
+		day = today; // init values
+	if (today != day)
+	{
+		day = today; // set day to new day
+		result = true;
+	}
+	return result;
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////
+//
 void loop()
 {
 	avgCpuDelta = getCpuDelta();
 
 	delay(10); // https://github.com/espressif/esp-idf/issues/1021
+
+	if (checkMidnight())
+	{
+		// reset all counter on midnight
+		gatewayTxMessage = 0;
+		gatewayRxMessage = 0;
+		sensorTxMessage = 0;
+		sensorRxMessage = 0;
+		indicatorTxErrors = 0;
+	}
 
 	if (WiFi.status() != WL_CONNECTED)
 	{
@@ -674,17 +859,16 @@ void loop()
 		{
 			alertSent = false;
 		}
-		
+
 		char buf[128];
-		if (snprintf(buf, sizeof(buf), 
-			"%s<br />%s<br />cycle: %lu &mu;s<br />heap: %s / fragm: %u%% / blocks: %u", 
-			timestamp, 
-			runtime(), 
-			getCpuDelta(), 
-			formatBytes(heap).c_str(),
-			ESP.getHeapFragmentation(),
-			ESP.getMaxFreeBlockSize()
-			) < 0)
+		if (snprintf(buf, sizeof(buf),
+					 "%s<br />%s<br />cycle: %lu &mu;s<br />heap: %s / fragm: %u%% / blocks: %u",
+					 timestamp,
+					 runtime(),
+					 getCpuDelta(),
+					 formatBytes(heap).c_str(),
+					 ESP.getHeapFragmentation(),
+					 ESP.getMaxFreeBlockSize()) < 0)
 		{
 			strcpy(buf, "<div class=\"error\">error</div>");
 		}
@@ -693,5 +877,14 @@ void loop()
 		buf[0] = {'\0'};
 
 		updateWebStats();
+	}
+
+	// interval based jobs
+	if (millis() - gw_send_prev_time > gw_send_interval)
+	{
+		gw_send_prev_time = millis();
+
+		sendHeartbeat();
+		send(msgUptime.set(uptime()));
 	}
 }

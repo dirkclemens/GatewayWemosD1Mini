@@ -99,6 +99,14 @@ const char index_html[] PROGMEM = R"=====(
 			var element = document.getElementById('info');
 			element.innerHTML = e.data;
 		}, false);
+		es.addEventListener('indicator', function(e) {
+			var element = document.getElementById('indicator');
+			element.innerHTML = e.data;
+		}, false);
+		es.addEventListener('led', function(e) {
+			var element = document.getElementById('led');
+			element.innerHTML = e.data;
+		}, false);
 		es.addEventListener('messagesjson', function(e) {
 			const obj = JSON.parse(e.data);
 			console.log(obj);
@@ -153,14 +161,18 @@ const char index_html[] PROGMEM = R"=====(
 	</div>
 </section>    
 
-<section id="tab_messages" class="tabcontent">            
+<section id="tab_messages" class="tabcontent">
 	<div class="row">
-		<div id="messages">&nbsp;</div>
+		<div class="tooltip">
+			<div id="messages">&nbsp;</div>
+			<span class="tooltiptext" id="indicator"></span>
+		</div>
 	</div>
 </section>    
 
 <section>    
 	<div class="row">
+		<div id="led"></div>
 		<div class="debug" id="debug"></div>
 	</div>
 </section>
