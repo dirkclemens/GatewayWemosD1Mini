@@ -31,7 +31,8 @@ const char *mysIndicationErrorCodes0[] = {
     "Node just woke from sleep.", 
     "Start of OTA firmware update process.", 
     "Received a piece of firmware data.", 
-    "Received wrong piece of firmware data."};
+    "Received wrong piece of firmware data."
+};
 
 const char *mysIndicationErrorCodes100[] = {
 	"HW initialization error", 
@@ -49,4 +50,5 @@ const char *mysIndicationErrorCodes100[] = {
 	"Node is locked.", 
 	"Firmware update flash initialisation failure.", 
 	"Firmware update timeout.", 
-	"Firmware update checksum mismatch."};
+	"Firmware update checksum mismatch."
+};

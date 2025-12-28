@@ -1,12 +1,47 @@
 /*
- * 
+  	Wemos D1 mini, 4MB Chip
+	PLATFORM: Espressif 8266 (2.6.2) > WeMos D1 R2 and mini
+	HARDWARE: ESP8266 80MHz, 80KB RAM, 4MB Flash
+
+	PLATFORM: Espressif 8266 (2.6.2) > WeMos D1 mini Pro
+	HARDWARE: ESP8266 80MHz, 80KB RAM, 16MB Flash
+
+
+  	Firmware auslesen: 
+  	/opt/homebrew/bin/esptool.py -p /dev/cu.usbserial-1220 -b 115200 read_flash 0 0x400000 flash_contents.bin
+
+	OTA Upload
+	// python3 -m pip install --user espota
+	// /Users/dirk/.platformio/packages/framework-arduinoespressif8266/tools/espota.py
+	// /Users/dirk/Library/Arduino15/packages/esp8266/hardware/esp8266/3.1.2/tools/espota.py
+	python3 espota.py -i 192.168.2.211 -p 8266 -f .pio/build/d1_mini_ota/firmware.bin
+
+
+	bauen unbedingt mit 'platform = espressif8266@2.6.2'	
+
+	LittleFS: 
+	https://docs.platformio.org/en/latest/platforms/espressif8266.html#using-filesystem
+	https://randomnerdtutorials.com/esp8266-nodemcu-vs-code-platformio-littlefs/
+ 
  */
+
+extern "C" {
+#include <user_interface.h>
+}
 
 #include "config.h"
 #include "common.h"
 #include "uptime.h"
 #include "mysensors_types.h"
 
+// MQTT Gateway
+// https://github.com/mysensors/MySensors/blob/master/examples/GatewayESP8266MQTTClient/GatewayESP8266MQTTClient.ino
+// #define WITH_MQTT
+
+// else IP-Gateway
+// https://github.com/mysensors/MySensors/blob/master/examples/GatewayESP8266/GatewayESP8266.ino
+
+//#define MAX_MESSAGE_SIZE  (32u) 
 // dic: extended debugging
 //#define MY_DEBUG_VERBOSE
 
@@ -17,12 +52,34 @@
 #define MY_RADIO_RF24
 // #define RF24_PA_LEVEL RF24_PA_MAX
 
-// dic: repeater, already included when using as controller
-//#define MY_REPEATER_FEATURE
-
-#define MY_GATEWAY_ESP8266
-
 #include "./../../credentials.h"
+
+//=====================================================================
+#pragma region configuration
+
+#ifdef WITH_MQTT
+	#define MY_GATEWAY_MQTT_CLIENT
+#else
+	#define MY_GATEWAY_ESP8266
+#endif
+
+
+#ifdef WITH_MQTT
+	#define MY_GATEWAY_MQTT_CLIENT
+	// Set this node's subscribe and publish topic prefix
+	#define MY_MQTT_PUBLISH_TOPIC_PREFIX "mygateway1-out"
+	#define MY_MQTT_SUBSCRIBE_TOPIC_PREFIX "mygateway1-in"
+	// Set MQTT client id
+	#define MY_MQTT_CLIENT_ID "mysensors-1"
+	// Enable these if your MQTT broker requires usenrame/password
+	// #define MY_MQTT_USER "***"
+	// #define MY_MQTT_PASSWORD "***"
+	// MQTT broker ip address or url. Define one or the other.
+	//#define MY_CONTROLLER_URL_ADDRESS "m20.cloudmqtt.com"
+	#define MY_CONTROLLER_IP_ADDRESS 192, 168, 2, 222
+	// The MQTT broker port to to open
+	#define MY_PORT 1883
+#endif
 
 // Enable UDP communication
 // #define MY_USE_UDP
@@ -30,23 +87,27 @@
 // Set the hostname for the WiFi Client. This is the hostname
 // it will pass to the DHCP server if not static.
 #define MY_HOSTNAME "GatewayWemosD1Mini"
-#define SKETCH_NAME "GatewayWemosD1Mini"
+
 // #define MY_ESP8266_HOSTNAME "MYSD1MiniGatewayOTA"
 
 // Enable MY_IP_ADDRESS here if you want a static ip address (no DHCP)
+// DiC: nicht definieren, sonst läuft FHEM nicht damit
 // #define MY_IP_ADDRESS 192, 168, 2, 221
 
 // If using static ip you need to define Gateway and Subnet address as well
-//#define MY_IP_GATEWAY_ADDRESS 192,168,2,23    /// IMMER DIE IP ADRESSE DES CONTROLLERS: smarthome !!!!
+// #define MY_IP_GATEWAY_ADDRESS 192,168,2,23    /// IMMER DIE IP ADRESSE DES CONTROLLERS: smarthome !!!!
+// DiC: nicht definieren, sonst läuft FHEM nicht damit
 // #define MY_IP_GATEWAY_ADDRESS 192, 168, 2, 222 // (geändert 09.07.2020)  /// IMMER DIE IP ADRESSE DES CONTROLLERS: smarthome !!!!
 // #define MY_IP_SUBNET_ADDRESS 255, 255, 255, 0
 
 // The port to keep open on node server mode
-#define MY_PORT 5003
+#ifndef WITH_MQTT
+	#define MY_PORT 5003
+#endif
 
 // How many clients should be able to connect to this gateway (default 1)
 // https://forum.mysensors.org/topic/2712/my_gateway_max_clients
-#define MY_GATEWAY_MAX_CLIENTS 2 // (geändert 2.5.2019, voher 3)
+#define MY_GATEWAY_MAX_CLIENTS 4 // (geändert 21.2.24 2 auf 4// 2.5.2019, vorher 3)
 
 // Controller ip address. Enables client mode (default is "server" mode).
 // Also enable this if MY_USE_UDP is used and you want sensor data sent somewhere.
@@ -68,10 +129,13 @@
 // Led pins used if blinking feature is enabled above
 // Wemos D1 Mini Pins !!!
 // D4	 IO, 10k Pull-up, BUILTIN_LED	 GPIO2
-// #define MY_DEFAULT_ERR_LED_PIN 5
-#define MY_DEFAULT_RX_LED_PIN D4
-// #define MY_DEFAULT_TX_LED_PIN D0
+#define MY_DEFAULT_ERR_LED_PIN D1
+#define MY_DEFAULT_RX_LED_PIN D0
+#define MY_DEFAULT_TX_LED_PIN D3
+#define MY_WITH_LEDS_BLINKING_INVERSE	// bei externen LEDs
+
 #define MY_INDICATION_HANDLER
+#define MY_SPLASH_SCREEN_DISABLED
 
 unsigned long gatewayTxMessage = 0;
 unsigned long gatewayRxMessage = 0;
@@ -79,10 +143,11 @@ unsigned long sensorTxMessage = 0;
 unsigned long sensorRxMessage = 0;
 unsigned long indicatorTxErrors = 0;
 
+
 // because SPIFFS is deprecated
-// #include <LittleFS.h>
-// #define SPIFFS LittleFS
-#include "FS.h"
+#include <LittleFS.h>
+//#define SPIFFS LittleFS
+// #include "FS.h" 
 
 // #ifdef MY_USE_UDP
 // #include <WiFiUdp.h>
@@ -130,6 +195,9 @@ static unsigned long gw_send_prev_time;
 unsigned long cpuLastMicros = 0; // cpu utilisation
 unsigned long avgCpuDelta = 0;	 // cpu utilisation
 
+//---------------------------------------------------------------------
+#pragma endregion
+
 // /////// /////////////////////////////////////////////////////////////////////
 // Initialize message types
 // https://www.mysensors.org/download/serial_api_20#variable-types
@@ -137,6 +205,13 @@ unsigned long avgCpuDelta = 0;	 // cpu utilisation
 MyMessage msgGeneral(CHILD_ID_GENERAL, V_VAR1);
 MyMessage msgUptime(CHILD_ID_UPTIME, V_TEXT);
 
+// ARC (Automatic Retries Count) message
+#define SENSOR_ID_ARC		98
+#define V_TYPE_ARC			V_VAR5
+MyMessage arcMessage(SENSOR_ID_ARC, V_TYPE_ARC);
+
+//=====================================================================
+#pragma region telnet functions
 /* 
  * 	https://github.com/dragondaud/SolarGuardn/blob/master/SolarGuardn.ino
  */
@@ -213,37 +288,202 @@ void loop_Telnet(void)
 } // handleTelnet()
 #endif // TELNET
 
+//---------------------------------------------------------------------
+#pragma endregion
+
+//=====================================================================
+#pragma region stats functions
+
+/// for counting indication() status notifications
+struct RxTxStats_t {
+	unsigned nRx, nTx, nGwRx, nGwTx, nErr;
+} rxtxStats;
+
+/// nMessagesRx[i] counts messages received from node id `i`
+unsigned nMessagesRx[256];
+/// nMessagesTx[i] counts messages sent to node id `i`
+unsigned nMessagesTx[256];
+/// nRetries[i] counts mretries required for messages sent to node id `i`
+unsigned nRetries[256];
+
+struct ArcStats_t {
+    unsigned packets;   ///< number of packets sent
+    unsigned retries;   ///< number of retries required
+    unsigned success;   ///< success rate in percent
+} arcStats;
+
+// https://github.com/esp8266/Arduino/blob/master/tools/sdk/include/user_interface.h
+const char* reset_reasons_esp8266[] = {
+	"0: power on",
+	"1: hardware watch dog",
+	"2: exception reset",
+	"3: software watch dog",
+	"4: software restart",
+	"5: wake up from deep-sleep",
+	"6: external system reset"
+};
+
+const char* reset_reasons_esp32[] = {
+	"0: none",
+	"1: Vbat power on reset",
+	"2: unknown",
+	"3: Software reset digital core",
+	"4: Legacy watch dog reset digital core",
+	"5: Deep Sleep reset digital core",
+	"6: Reset by SLC module, reset digital core",
+	"7: Timer Group0 Watch dog reset digital core",
+	"8: Timer Group1 Watch dog reset digital core",
+	"9: RTC Watch dog Reset digital core",
+	"10: Instrusion tested to reset CPU",
+	"11: Time Group reset CPU",
+	"12: Software reset CPU",
+	"13: RTC Watch dog Reset CPU",
+	"14: for APP CPU, reseted by PRO CPU",
+	"15: Reset when the vdd voltage is not stable",
+	"16: RTC Watch dog reset digital core and rtc module"
+};
+//---------------------------------------------------------------------
+#pragma endregion
+
+//=====================================================================
+#pragma region ARC statistics
+/**
+ * @brief Collect statistics re Automatic Retries Count (ARC) for RF24.
+ * Call this function immediately after each `send()` call.
+ * 
+ * @return int  number of retries required for most recent send
+ * 
+ */
+int collectArcStatistics()
+{
+	int rssi = transportHALGetSendingRSSI();	// boils down to (-29 - (8 * (RF24_getObserveTX() & 0xF)))
+	int arc = (-(rssi+29))/8;
+	arcStats.packets++;         // # of packets sent
+	arcStats.retries += arc;    // # of retries required
+    arcStats.success = 
+        arcStats.packets ? 
+            (100uL * arcStats.packets) / (arcStats.packets + arcStats.retries) 
+            : 100;
+    return arc;
+}
+
+time_t t_last_clear = 0;
+
+time_t getTimeNow()
+{
+#ifdef USE_NTP
+    return ntpClient.getEpochTime();
+#else
+    return time(nullptr);
+#endif
+}
+
+/**
+ * @brief Reset all statistics counters to zero. Do this every hour or so
+ * 
+ */
+void initStats()
+{
+	memset( nMessagesRx, 0, sizeof(nMessagesRx));
+	memset( nMessagesTx, 0, sizeof(nMessagesTx));
+	memset( nRetries, 0, sizeof(nRetries));
+	memset( &rxtxStats, 0, sizeof(rxtxStats) );
+    memset( &arcStats, 0, sizeof arcStats );
+    t_last_clear = getTimeNow();
+}
+
+
+/**
+ * @brief Send JSON-esque message with error statistics, then reset counters.
+ * Error statistics include # of packets sent, # of retries required, success rate
+ * Call this once per hour or so
+ * 
+ * @return const char* pointer to string sent to MySensors, like "{P:100;R:10;S:90}"
+ *
+ * Success rate:
+ * 5 packets 0 retries = 100%
+ * 5 packets 5 retries = 50%
+ * 5 packets 20 retries = 20%
+ */
+const char* reportArcStatistics()
+{
+	//              				    1...5...10...15...20...25 max payload
+	//				                    |   |    |    |    |    |
+	static char payload[26];	//      {P:65535;R:65535;S:100}
+	snprintf(payload, sizeof payload, "{P:%u,R:%u,S:%u}",
+        arcStats.packets, arcStats.retries, arcStats.success );
+
+    //memset( &arcStats, 0, sizeof arcStats );
+	arcMessage.setSensor(SENSOR_ID_ARC).setType(V_TYPE_ARC);
+	delay(10);
+    send(arcMessage.set(payload));
+	return payload;
+}
+
+/**
+ * @brief Called immdiately after a message has been sent, so we can do ARC statistics
+ * 
+ * @param nextRecipient     the immediate destination node id, may be final destination or repeater
+ * @param message           reference to the message being sent
+ */
+void aftertransportSend(const uint8_t nextRecipient, const MyMessage &message) 
+{
+    int arc = collectArcStatistics();
+    nMessagesTx[ nextRecipient ]++;
+    nRetries[ nextRecipient ] += arc;
+}
+//---------------------------------------------------------------------
+#pragma endregion
+
+
+//=====================================================================
+#pragma region logBootTime
+
 /*
  *
  */
 void logBootTime()
 {
 	dbgprintln(ico_info, "Updating bootlog");
-	boolean fsOk = SPIFFS.begin();
+	boolean fsOk = LittleFS.begin();
 	if (fsOk)
 	{
-		File file = SPIFFS.open("/bootlog.txt", "a");
+		File file = LittleFS.open("/bootlog.txt", "a");
 		if (!file || file.isDirectory())
 		{
-			dbgprintln(ico_error, "Error: Unable to open boot log in SPIFFS");
+			dbgprintln(ico_error, "Error: Unable to open boot log in LittleFS");
 		}
 		else
 		{
+			String resetReason = "";
+			if (resetInfo.reason < 7) {
+				resetReason = reset_reasons_esp8266[resetInfo.reason];
+			} else {
+				resetReason = "Unknown Reset reason: " + String(resetInfo.reason);
+			}
+
 			char buffer[64] = {'\0'};
-			snprintf(buffer, "%s - %s", getBootTime().c_str(), ESP.getResetReason().c_str());
+			if (snprintf(buffer, sizeof(buffer), "%s - %s", getBootTime().c_str(), resetReason.c_str()) < 0)
+			{
+				buffer[0] = '\0';
+			}
 			dbgprintf(ico_info, "adding to bootlog.txt: %s", buffer);
 			file.println(buffer); // add entry to log file
 			buffer[0] = '\0';
 			file.close();
 		}
-		SPIFFS.end();
+		// LittleFS.end();
 	}
 	else
 	{
-		dbgprintln(ico_error, "error opening SPIFFS!");
+		dbgprintln(ico_error, "error opening LittleFS!");
 	}
 }
+//---------------------------------------------------------------------
+#pragma endregion
 
+//=====================================================================
+#pragma region setup_OTA
 /*
  *
  */
@@ -253,9 +493,9 @@ void setup_OTA()
 	ArduinoOTA.setHostname(MY_HOSTNAME);
 
 	ArduinoOTA.onStart([]() {
-		// Clean SPIFFS
+		// Clean LittleFS
 		// https://arduino-esp8266.readthedocs.io/en/latest/filesystem.html#end
-		SPIFFS.end();
+		LittleFS.end();
 		dbgprintln(ico_info, "Start");
 		send_Event("[OTA] Start", "debug");
 	});
@@ -266,7 +506,7 @@ void setup_OTA()
 	ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
 		dbgprintf(ico_info, "[OTA] Progress: %d%%", progress / (total / 100));
 		char buf[32] = {'\0'};
-		if (snprintf(buf, sizeof(buf), "[OTA] Progress: %d%%", abs(progress / (total / 100))) < 0) // Means append did not (entirely) fit
+		if (snprintf(buf, sizeof(buf), "[OTA] Progress: %d%%", abs(int(progress / int(total / 100)))) < 0) // Means append did not (entirely) fit
 		{
 			buf[0] = '\0';
 		}
@@ -304,6 +544,8 @@ void setup_OTA()
 	dbgprintf(ico_info, "FOTA Initialized using IP address: %s", WiFi.localIP().toString().c_str());
 #endif // OTA
 }
+//---------------------------------------------------------------------
+#pragma endregion
 
 ///////////////////////////////////////////////////////
 /* 
@@ -320,7 +562,7 @@ void setup_OTA()
  */
 void getMessagePayload(char *payload, MyMessage message)
 {
-	char _payload[32] = {'\0'};
+	char _payload[2 * MAX_MESSAGE_SIZE -1 ] = {'\0'};
 	// mysensors_payload_t plt = ;
 	// DEBUG_PRINTF("getMessagePayload: %d - %d\n", message.getPayloadType(), message.type);
 	switch (message.getPayloadType())
@@ -364,11 +606,18 @@ void getMessagePayload(char *payload, MyMessage message)
 		strcpy(payload, _payload);
 		break;
 	case 6:
-		if (snprintf(_payload, sizeof(_payload), "%p %s", (void *)message.getCustom(), (char *)mysSetReqUnits[message.type]) < 0) // Means append did not (entirely) fit
-		{
-			_payload[0] = '\0';
+		// if (snprintf(_payload, sizeof(_payload), "%p %s", (void *)message.getCustom(), (char *)mysSetReqUnits[message.type]) < 0) // Means append did not (entirely) fit
+		if (message.getCommand() == C_STREAM) {
+			message.getStream(payload);
 		}
-		strcpy(payload, _payload);
+		else 
+		{
+			if (snprintf(_payload, sizeof(_payload), "%p (%u)", (void *)message.getCustom(), message.getLength()) < 0) // Means append did not (entirely) fit
+			{
+				_payload[0] = '\0';
+			}
+			strcpy(payload, _payload);
+		}
 		break;
 	case 7:
 		if (snprintf(_payload, sizeof(_payload), "%0.2f %s", message.getFloat(), (char *)mysSetReqUnits[message.type]) < 0) // Means append did not (entirely) fit
@@ -386,7 +635,7 @@ void getMessagePayload(char *payload, MyMessage message)
 		break;
 	}
 	_payload[0] = {'\0'};
-	// dbgprintf("getMessagePayload %s\n", payload);
+	dbgprintf(ico_info, "getMessagePayload %s\n", payload);
 }
 
 /*
@@ -395,6 +644,13 @@ void getMessagePayload(char *payload, MyMessage message)
 void updateWebStats()
 {
 	char timestamp[21] = {'\0'};
+
+	String resetReason = "";
+	if (resetInfo.reason < 7) {
+		resetReason = reset_reasons_esp8266[resetInfo.reason];
+	} else {
+		resetReason = "Unbekannter Reset-Grund: " + String(resetInfo.reason);
+	}
 
 	getCurrentTimeString(timestamp, "%Y-%m-%d %H:%M:%S");
 	// https://arduino-esp8266.readthedocs.io/en/latest/libraries.html#esp-specific-apis
@@ -418,7 +674,7 @@ void updateWebStats()
 #ifdef MY_CORE_ONLY
 				  "<tr><td>MY_CORE_ONLY</td><td>TRUE</td></tr>" +
 #endif
-				  "<tr><td><a href=\"/bootlog.txt\">reset reason</a></td><td>" + ESP.getResetReason() + "</td></tr>" +
+				  "<tr><td><a href=\"/bootlog.txt\">reset reason</a></td><td>" + resetReason + "</td></tr>" +
 				  "</table>" +
 				  "</div></body></html>";
 	send_Event(page.c_str(), "info");
@@ -426,6 +682,8 @@ void updateWebStats()
 	page = String();
 }
 
+//=====================================================================
+#pragma region MySensors receive
 /* 
  *
  */
@@ -434,15 +692,14 @@ void receive(const MyMessage &message)
 	char logbuf[128] = {'\0'};
 	char webjson[256] = {'\0'};
 	char timestamp[21] = {'\0'};
-	char payload[32] = {'\0'};
+	char payload[2 * MAX_MESSAGE_SIZE -1] = {'\0'}; // 2 * (32u) - 1 = 63 ?
 	char msgtype[26] = {'\0'};
 	char cmdtype[4] = {'\0'};
 	char ack = '0';
 
-	// getCurrentTimeString(timestamp, "%Y-%m-%d %H:%M:%S");
 	getCurrentTimeString(timestamp, "%H:%M:%S");
 
-	if (message.isAck())
+	if (message.isEcho())
 	{
 		ack = '1';
 	}
@@ -528,6 +785,9 @@ void receive(const MyMessage &message)
 #endif
 }
 
+//=====================================================================
+#pragma endregion
+
 /*
  *
  */
@@ -591,6 +851,8 @@ void setup_wifi()
 }
 #endif
 
+//=====================================================================
+#pragma region pushover function
 /* 
  *	send alerts via Pushover.net API (registration necessary)
  */
@@ -641,20 +903,29 @@ void pushover(const char *message, const char *title = "MySensors Gateway")
 	}
 	pushmessage[0] = '\0';
 }
+//---------------------------------------------------------------------
+#pragma endregion
 
+//=====================================================================
+#pragma region MySensors before
 //////////////////////////////////////////////////////////////////////////////////////////////////
 //
 void before()
 {
 }
+//---------------------------------------------------------------------
+#pragma endregion
 
+//=====================================================================
+#pragma region MySensors presentation
 //////////////////////////////////////////////////////////////////////////////////////////////////
 //
 void presentation()
 {
-	sendSketchInfo(SKETCH_NAME, __DATE__ " " __TIME__);
+	sendSketchInfo(MY_HOSTNAME, __DATE__ " " __TIME__);
 	wait(200);
 	present(CHILD_ID_UPTIME, S_INFO, "uptime");
+	present(SENSOR_ID_ARC, S_CUSTOM, F("ARC stats (JSON)") );
 }
 
 void loop_NTP()
@@ -673,7 +944,15 @@ void loop_NTP()
 		}
 	}
 }
+//---------------------------------------------------------------------
+#pragma endregion
 
+/**
+ * @brief React to various events reported by MySensors
+ * (Standard MySensors function to be implemented in application)
+ * 
+ * @param ind 
+ */
 //////////////////////////////////////////////////////////////////////////////////////////////////
 //	#define MY_INDICATION_HANDLER is needed
 //
@@ -683,23 +962,29 @@ void indication(const indication_t indicator)
 	{
 	case INDICATION_GW_TX:
 		gatewayTxMessage++;
+		rxtxStats.nGwTx++;
 		// send_Event("<img src=\"green.svg\" />", "led");
 		break;
 
 	case INDICATION_GW_RX:
 		gatewayRxMessage++;
+		rxtxStats.nGwRx++; 
 		// send_Event("<img src=\"red.svg\" />", "led");
 		break;
 
 	case INDICATION_TX:
 		sensorTxMessage++;
+		rxtxStats.nTx++; 
 		// send_Event("<img src=\"green.svg\" />", "led");
 		break;
 
 	case INDICATION_RX:
 		sensorRxMessage++;
+		rxtxStats.nRx++; 
 		// send_Event("<img src=\"red.svg\" />", "led");
 		break;
+
+	case INDICATION_ERR_TX:	rxtxStats.nErr++; break;
 
 	default:
 		// send_Event("<img src=\"yellow.svg\" />", "led");
@@ -734,15 +1019,35 @@ void indication(const indication_t indicator)
 	// dbgprintln(ico_info, msgbuf);
 }
 
+
+//=====================================================================
+#pragma region MySensors setup
 //////////////////////////////////////////////////////////////////////////////////////////////////
 //
 void setup()
 {
+	// esp8266 reset reasons
+  	rst_info *resetInfo;
+  	resetInfo = ESP.getResetInfoPtr();
+	// Serial.println(resetInfo->reason);
+
+	// esp32 reset reasons
+	// int rtc_reset_reason = rtc_get_reset_reason(0);    
+
 #ifdef MY_DEBUG
 	Serial.begin(9600);
 	while (!Serial)
 	{
 	} // Wait
+
+	Serial.println("---------- begin setup()");
+    Serial.println(FRIENDLY_PROJECT_NAME " svn:" SVN_REV);
+    Serial.println(VERSION "compiled " __DATE__ " " __TIME__);
+	
+	// esp8266
+	Serial.printf("Reset reason %s\n",resetInfo->reason);
+	// esp32
+    Serial.printf("Reset reason %s\n",reset_reasons[rtc_reset_reason]);
 #endif
 
 	cpuLastMicros = micros();
@@ -754,6 +1059,7 @@ void setup()
 #ifdef TELNET
 	telnetServer.begin();
 	//telnetServer.setNoDelay(true); // drops chars if set true
+	telnetServer.printf("Reset reason %s\n", reset_reasons_esp8266[resetInfo->reason]);
 #endif // TELNET
 
 #ifdef NTP
@@ -772,12 +1078,20 @@ void setup()
 	{
 		// pushover("Gateway successfully started");
 	}
+	
+	// boolean fsOK = 
+	LittleFS.begin();// Filesystem mounten
 
+	// initialize statistics
+    initStats();
+	
 	// call not before time was set to local time
 	setBootTime();
-	// and write it to SPIFFS
+	// and write it to LittleFS
 	logBootTime();
 }
+//---------------------------------------------------------------------
+#pragma endregion
 
 /*
  *
@@ -788,7 +1102,7 @@ boolean checkMidnight()
 	struct tm tm;
 	time_t now = time(&now);
 	localtime_r(&now, &tm);
-	char stoday[2] = "00";
+	char stoday[3] = "\0";
 	strftime(stoday, sizeof(stoday), "%d", &tm); // http://www.cplusplus.com/reference/ctime/strftime/
 	int today = atoi(stoday);
 	boolean result = false;
@@ -802,6 +1116,8 @@ boolean checkMidnight()
 	return result;
 }
 
+//=====================================================================
+#pragma region MySensors loop
 //////////////////////////////////////////////////////////////////////////////////////////////////
 //
 void loop()
@@ -809,6 +1125,7 @@ void loop()
 	avgCpuDelta = getCpuDelta();
 
 	delay(10); // https://github.com/espressif/esp-idf/issues/1021
+	yield();
 
 	if (checkMidnight())
 	{
@@ -886,5 +1203,11 @@ void loop()
 
 		sendHeartbeat();
 		send(msgUptime.set(uptime()));
+
+		// every now and then, report ARC statistics ("pseudo-RSSI")
+		const char* arc = reportArcStatistics();
+		send_Event(arc, "debug");
 	}
 }
+//---------------------------------------------------------------------
+#pragma endregion

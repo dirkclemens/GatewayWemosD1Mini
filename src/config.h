@@ -4,7 +4,8 @@
 #include <Arduino.h>
 #include <pgmspace.h>               // for flash constants to save ram
 
-#define __SWVERSION__       "2.0.10"
+// #define __SWVERSION__       "2.0.10"
+#define __SWVERSION__       "2.4.1" // HA
 
 #define OTA
 #define WWW

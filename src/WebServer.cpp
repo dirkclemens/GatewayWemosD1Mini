@@ -23,6 +23,11 @@
 AsyncWebServer server(80);
 AsyncEventSource events("/events");
 
+// because SPIFFS is deprecated
+#include <LittleFS.h>
+// #define SPIFFS LittleFS
+// #include "FS.h" 
+
 //flag to use from web update to reboot the ESP
 bool shouldReboot 							= false;
 
@@ -105,12 +110,12 @@ void send_Status(AsyncWebServerRequest *request)
 	resp->println();
 
 	// https://arduino-esp8266.readthedocs.io/en/latest/filesystem.html#file-object
-	boolean fsOk = SPIFFS.begin();
+	boolean fsOk = LittleFS.begin();
 	if (fsOk) 
 	{	
 		resp->print ("Filesystem\n-----------------------------\n");
 		FSInfo fs_info;
-		if (SPIFFS.info(fs_info))
+		if (LittleFS.info(fs_info))
 		{
 			resp->printf("      FS totalBytes: %d bytes\n", fs_info.totalBytes);
 			resp->printf("      FS  usedBytes: %d bytes\n", fs_info.usedBytes);
@@ -122,29 +127,30 @@ void send_Status(AsyncWebServerRequest *request)
 		}
 
 		resp->print ("Files\n-----------------------------\n");
-		Dir dir = SPIFFS.openDir("/");
+		Dir dir = LittleFS.openDir("/");
 		while (dir.next()) {    
 			resp->printf("FS File: %s, size: %s\n",  dir.fileName().c_str(), formatBytes(dir.fileSize()).c_str());
 		}
 		resp->println();
 
 		resp->print ("Bootlog\n-----------------------------\n");
-		File file = SPIFFS.open("/bootlog.txt", "r");
+		File file = LittleFS.open("/bootlog.txt", "r");
 		while (file.available()) {
-			// resp->printf("%s\n", file.readStringUntil('\n').c_str());
-			resp->printf("%s\n", file.readString().c_str());
+			resp->printf("%s\n", file.readStringUntil('\n').c_str());
+			// resp->printf("%s\n", file.readString().c_str());
 		}
 		// bootloglines += String(file.size()) + " Bytes";
 		file.close();
 	} 
 	else
 	{
-		resp->printf("error opening SPIFFS!\n");
+		resp->printf("error opening LittleFS!\n");
+		dbgprintln(ico_error, "error: reading from LittleFS.");	
 	}
-	SPIFFS.end();
+	// LittleFS.end();
 
 	// resp->print ("config.json\n-----------------------------\n");
-	// File configFile = SPIFFS.open("/config.json", "r");
+	// File configFile = LittleFS.open("/config.json", "r");
 	// String data = configFile.readString();
 	// configFile.close();
 	// resp->printf("%s\n", data.c_str());
@@ -166,6 +172,9 @@ String processor(const String& var)
  */
 void setup_WebServer()
 {
+	// boolean fsOK = 
+	LittleFS.begin();// Filesystem mounten
+
 	events.onConnect([](AsyncEventSourceClient *client) {
 		client->send("connected !", NULL, millis(), 1000);
 	});
@@ -206,33 +215,39 @@ void setup_WebServer()
 	server.on("/bootlog.txt", [](AsyncWebServerRequest *request){
 		AsyncResponseStream *resp = request->beginResponseStream("text/plain");
 		dbgprintln(ico_info, "start reading from bootlog.txt");
-		boolean fsOk = SPIFFS.begin();
+		boolean fsOk = LittleFS.begin();
 		if (fsOk) 
 		{	
-			File file = SPIFFS.open("/bootlog.txt", "r");
-			char buffer[64] = {'\0'};
+			dbgprintln(ico_info, "LittleFS is open, start reading file ...");
+			File file = LittleFS.open("/bootlog.txt", "r");
 			while (file.available()) {
-				// resp->printf("%s\n", file.readStringUntil('\n').c_str());
-				snprintf(buffer, "%s", file.readString().c_str());
-				dbgprintf(ico_info, "%s", buffer);
-				resp->printf("%s\n", buffer);
-				buffer[0] = '\0';
+				resp->printf("%s\n", file.readStringUntil('\n').c_str());
 			}			
+			dbgprintln(ico_info, "closing file");
 			file.close();			
 		}
-		SPIFFS.end();
+		else 
+		{
+			dbgprintln(ico_error, "error: reading from LittleFS.");	
+		}
+		// LittleFS.end();
 		dbgprintln(ico_info, "reading from bootlog.txt - done.");
 		request->send(resp);
 	});
 
-	server.on("/wipefs", [](AsyncWebServerRequest *request){
+	server.on("/wipe", [](AsyncWebServerRequest *request){
 		dbgprintln(ico_info, "removing bootlog.txt");
-		boolean fsOk = SPIFFS.begin();
+		boolean fsOk = LittleFS.begin();
 		if (fsOk) 
 		{	
-			SPIFFS.remove("/bootlog.txt");
+			LittleFS.remove("/bootlog.txt");
 		}
-		SPIFFS.end();
+		else 
+		{
+			dbgprintln(ico_error, "error: reading from LittleFS.");	
+		}
+
+		// LittleFS.end();
 		dbgprintln(ico_info, "done.");
 		request->send_P(200, "text/html", index_html, processor);
 	});
@@ -256,9 +271,9 @@ void setup_WebServer()
 		request->send_P(200, "text/html", index_html, processor);
 	});
 
-  	server.on("/reboot", HTTP_GET, [](AsyncWebServerRequest *request){
-		request->send_P(200, "text/html", reboot_html, processor);
-	});
+  	// server.on("/reboot", HTTP_GET, [](AsyncWebServerRequest *request){
+	// 	request->send_P(200, "text/html", reboot_html, processor);
+	// });
 	server.on("/reboot", HTTP_POST, [](AsyncWebServerRequest *request) {
 		shouldReboot = !Update.hasError();
 		AsyncWebServerResponse *response = request->beginResponse(200, "text/plain", shouldReboot?"OK":"FAIL");
