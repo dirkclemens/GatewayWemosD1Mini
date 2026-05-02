@@ -121,7 +121,7 @@ section:after {
 .row {
     text-align: center;
     margin: 0px auto;
-    display: inline-block;
+    display: block;
 }
 .row:after {
     content: "";
@@ -212,8 +212,9 @@ td:hover {
     text-align: left;
     padding: 6px;
 }
-#messages table {
-    width: 800px;
+#messages table,
+#diagTable table{
+    width: 100%;
 }
 #messages th:first-child,
 #messages td:first-child,
@@ -225,6 +226,47 @@ td:hover {
 #messages {
     text-align: left;
     padding: 6px;
+}
+.logline {
+    display: block;
+    text-align: left;
+    font-family: monospace;
+    border-bottom: 1px solid #ececec;
+    padding: 3px 4px;
+}
+.logline .ts {
+    color: #666;
+}
+.logline .lv {
+    display: inline-block;
+    min-width: 56px;
+    font-weight: bold;
+}
+.logline.error .lv {
+    color: #c62828;
+}
+.logline.warn .lv {
+    color: #ef6c00;
+}
+.logline.info .lv {
+    color: #1565c0;
+}
+#diagChart {
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    background: #fff;
+}
+.statusBadge {
+    font-size: 0.95em;
+    display: inline-block;
+    padding: 5px 10px;
+    margin: 0px 6px 6px 0px;
+    border-radius: 6px;
+    background-color: #f2f6f8;
+    border: 1px solid #d9e2e8;
+    color: #245b6b;
+    cursor: default;
+    user-select: text;
 }
 .button,
 button,
@@ -281,7 +323,7 @@ input[type="text"] {
 /* Tooltip container */
 .tooltip {
     position: relative;
-    display: inline-block;
+    /*display: inline-block;*/
 }
 .tooltip .tooltiptext {
     visibility: hidden;
@@ -451,5 +493,58 @@ input[type="text"] {
         -webkit-transform: rotate(360deg);
         transform: rotate(360deg);
     }
+}
+
+@mixin dot {
+  $dot-size: 7px;
+  content: "";
+  background-color: $separator-border-color;
+  display: block;
+  height: $dot-size;
+  width: $dot-size;
+  border-radius: 50%;
+}
+.separator--dots {
+  overflow: visible;
+  border: 0;
+  @include dot();
+  position: relative;
+  &:before {
+     @include dot();
+     position: absolute;
+     left: -32px;
+     animation: dot-move-left 1s ease-out forwards;
+  }
+    &:after {
+     @include dot();
+     position: absolute;
+     left: 32px;
+     animation: dot-move-right 1s ease-out forwards;
+  }
+}
+
+@keyframes dot-move-right {
+  0% {
+    left: 0;
+  }
+  100% {
+    left: 32px;
+  }
+}
+@keyframes dot-move-left {
+  0% {
+    left: 0;
+  }
+  100% {
+    left: -32px;
+  }
+}
+
+.separator--dotter {
+  border: 0;
+  border-bottom: $separator-size dotted $separator-border-color;
+
+  width: 0;
+  animation: separator-width 1.5s ease-out forwards;
 }
 )=====";

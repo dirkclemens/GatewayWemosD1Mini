@@ -55,6 +55,13 @@ const char index_html[] PROGMEM = R"=====(
 	}	
 	var queuelen = 30;
 	var queue = new CircularQueue(queuelen); 
+	var nodeNames = {};
+	var debugLines = [];
+	var indicatorLines = [];
+	var maxLogLines = 10;
+	var telemetryHistory = [];
+	var maxTelemetryPoints = 60;
+	var logLevel = 'info';
 
 	function doTab(evt, section) {
 		var i, tabcontent, tablinks;
@@ -92,16 +99,14 @@ const char index_html[] PROGMEM = R"=====(
 			}
 		};
 		es.addEventListener('debug', function(e) {
-			var element = document.getElementById('debug');
-			element.innerHTML = e.data;
+			appendLogLine('debug', e.data, detectLevel(e.data));
 		}, false);
 		es.addEventListener('info', function(e) {
 			var element = document.getElementById('info');
 			element.innerHTML = e.data;
 		}, false);
 		es.addEventListener('indicator', function(e) {
-			var element = document.getElementById('indicator');
-			element.innerHTML = e.data;
+			appendLogLine('indicator', e.data, detectLevel(e.data));
 		}, false);
 		es.addEventListener('led', function(e) {
 			var element = document.getElementById('led');
@@ -110,17 +115,21 @@ const char index_html[] PROGMEM = R"=====(
 		es.addEventListener('messagesjson', function(e) {
 			const obj = JSON.parse(e.data);
 			console.log(obj);
+			var senderLabel = obj.sender;
+			if (nodeNames[obj.sender]) {
+				senderLabel = obj.sender + " (" + nodeNames[obj.sender] + ")";
+			}
 			var row = "<tr>" +
 				"<td>" + obj.time + "</td>" + 
-				"<td>" + obj.cmd + "</td>" + 
-				"<td>" + obj.sender + "</td>" + 
+				"<td>" + senderLabel + "</td>" + 
 				"<td>" + obj.sensor + "</td>" + 
+				"<td>" + obj.cmd + "</td>" + 
 				"<td>" + obj.ack + "</td>" + 
 				"<td>" + obj.msgtype + "</td>" + 
 				"<td>" + obj.payload + "</td></tr>";
 			queue.push(row);
 			var i;
-			var text = "<table><thead><tr><th>time</th><th>cmd</th><th>node</th><th>sensor</th><th>ack</th><th>type</th><th>message</th></tr></thead><tbody>";
+			var text = "<table><thead><tr><th>time</th><th>node</th><th>sensor</th><th>cmd</th><th>ack</th><th>type</th><th>message</th></tr></thead><tbody>";
 			for (i = 0; i < queuelen; i++) {
 				text += queue.pop();
 			}
@@ -128,10 +137,166 @@ const char index_html[] PROGMEM = R"=====(
 			var msg = document.getElementById('messages');			
 			msg.innerHTML = text ;
 		}, false);
+		es.addEventListener('telemetry', function(e) {
+			try {
+				var t = JSON.parse(e.data);
+				updateBadges(t);
+				updateChart(t);
+			} catch(err) {
+				console.log('telemetry parse error', err);
+			}
+		}, false);
 	}
+
+	function detectLevel(text){
+		var t = (text || '').toLowerCase();
+		if (t.indexOf('❌') >= 0 || t.indexOf('error') >= 0 || t.indexOf('fail') >= 0) return 'error';
+		if (t.indexOf('❗') >= 0 || t.indexOf('warn') >= 0 || t.indexOf('disconnect') >= 0) return 'warn';
+		return 'info';
+	}
+
+	function setLogLevel(level){
+		logLevel = level;
+		document.getElementById('logLevel').innerHTML = 'Log level: ' + level;
+		renderLogLines('debug');
+		renderLogLines('indicator');
+	}
+
+	function appendLogLine(target, text, level){
+		var line = { ts: new Date().toLocaleTimeString(), level: level, text: text };
+		var list = target === 'debug' ? debugLines : indicatorLines;
+		list.push(line);
+		if (list.length > maxLogLines) list.shift();
+		renderLogLines(target);
+	}
+
+	function renderLogLines(target){
+		var list = target === 'debug' ? debugLines : indicatorLines;
+		var chunks = [];
+		for (var i = 0; i < list.length; i++) {
+			var l = list[i];
+			if (logLevel === 'warn' && l.level === 'info') continue;
+			if (logLevel === 'error' && l.level !== 'error') continue;
+			chunks.push("<span class='logline " + l.level + "'>" +
+				"<span class='ts'>" + l.ts + "</span> " +
+				"<span class='lv'>" + l.level.toUpperCase() + "</span> " +
+				"<span class='txt'>" + l.text + "</span></span>");
+		}
+		var html = chunks.join("");
+		document.getElementById(target).innerHTML = html || "<span class='logline'>no entries</span>";
+	}
+
+	function updateBadges(t){
+		document.getElementById('wifiBadge').innerHTML = 'WiFi: ' + (t.wifi || '?');
+		document.getElementById('rssiBadge').innerHTML = 'RSSI: ' + t.rssi + ' dBm';
+		document.getElementById('heapBadge').innerHTML = 'Heap: ' + t.heap;
+		document.getElementById('fragBadge').innerHTML = 'Frag: ' + t.frag + '%';
+		document.getElementById('ctrlBadge').innerHTML = 'GW rx/tx: ' + t.gwRx + '/' + t.gwTx;
+	}
+
+	function updateChart(t){
+		telemetryHistory.push({heap:t.heap, frag:t.frag});
+		if (telemetryHistory.length > maxTelemetryPoints) telemetryHistory.shift();
+		var canvas = document.getElementById('diagChart');
+		if (!canvas) return;
+		var ctx = canvas.getContext('2d');
+		var w = canvas.width, h = canvas.height;
+		ctx.clearRect(0,0,w,h);
+		ctx.fillStyle = '#fafafa';
+		ctx.fillRect(0,0,w,h);
+
+		var maxHeap = 1;
+		for (var i=0;i<telemetryHistory.length;i++) {
+			if (telemetryHistory[i].heap > maxHeap) maxHeap = telemetryHistory[i].heap;
+		}
+		var dx = telemetryHistory.length > 1 ? (w-10) / (telemetryHistory.length-1) : 1;
+
+		ctx.strokeStyle = '#2db6eb';
+		ctx.beginPath();
+		for (var j=0;j<telemetryHistory.length;j++) {
+			var x = 5 + j*dx;
+			var y = h - 5 - (telemetryHistory[j].heap / maxHeap) * (h-10);
+			if (j===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+		}
+		ctx.stroke();
+
+		ctx.strokeStyle = '#ef6c00';
+		ctx.beginPath();
+		for (var k=0;k<telemetryHistory.length;k++) {
+			var x2 = 5 + k*dx;
+			var y2 = h - 5 - (telemetryHistory[k].frag / 100.0) * (h-10);
+			if (k===0) ctx.moveTo(x2,y2); else ctx.lineTo(x2,y2);
+		}
+		ctx.stroke();
+	}
+
+	function loadNodeNames(){
+		fetch('/api/node-names')
+			.then(function(res){ return res.json(); })
+			.then(function(data){
+				nodeNames = data || {};
+				renderNodeNamesTable();
+			})
+			.catch(function(err){
+				console.log('node names load failed', err);
+			});
+	}
+
+	function renderNodeNamesTable(){
+		var keys = Object.keys(nodeNames).sort(function(a,b){ return parseInt(a) - parseInt(b); });
+		var html = "<table><thead><tr><th>node id</th><th>name</th></tr></thead><tbody>";
+		if (!keys.length) {
+			html += "<tr><td colspan='2'>(no aliases stored)</td></tr>";
+		} else {
+			keys.forEach(function(k){
+				html += "<tr><td>" + k + "</td><td>" + nodeNames[k] + "</td></tr>";
+			});
+		}
+		html += "</tbody></table>";
+		document.getElementById('nodeNamesTable').innerHTML = html;
+	}
+
+	function saveNodeName(){
+		var id = document.getElementById('nodeId').value.trim();
+		var name = document.getElementById('nodeName').value.trim();
+		if (id === "") {
+			alert("Please enter a node id (0-255).");
+			return;
+		}
+		var idNum = parseInt(id, 10);
+		if (isNaN(idNum) || idNum < 0 || idNum > 255) {
+			alert("Node id must be between 0 and 255.");
+			return;
+		}
+		var body = "id=" + encodeURIComponent(idNum) + "&name=" + encodeURIComponent(name);
+		fetch('/api/node-name', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: body
+		})
+		.then(function(res){ return res.json(); })
+		.then(function(resp){
+			if (!resp.ok) {
+				alert("Save failed: " + (resp.error || "unknown error"));
+				return;
+			}
+			if (name.length) {
+				nodeNames[idNum] = name;
+			} else {
+				delete nodeNames[idNum];
+			}
+			renderNodeNamesTable();
+		})
+		.catch(function(err){
+			alert("Save failed: " + err);
+		});
+	}
+
 	function onBodyLoad(){
 		document.getElementById("defaultOpen").click();
 		startEvents();
+		loadNodeNames();
+		setLogLevel('info');
 	}
 	</script>
 </head>
@@ -142,6 +307,7 @@ const char index_html[] PROGMEM = R"=====(
 			<img class="logo" src='data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPCEtLSBHZW5lcmF0ZWQgYnkgUGl4ZWxtYXRvciBQcm8gMy41LjcgLS0+Cjxzdmcgd2lkdGg9IjM0MSIgaGVpZ2h0PSIzNDEiIHZpZXdCb3g9IjAgMCAzNDEgMzQxIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPgogICAgPGcgaWQ9IkdydXBwZSI+CiAgICAgICAgPHBhdGggaWQ9IlBmYWQiIGZpbGw9IiMzNGMzZjAiIHN0cm9rZT0ibm9uZSIgZD0iTSAxNTcuMzMzMzI4IDMuOTMzMzE5IEMgMTE3LjU5OTk5OCA3LjM5OTk5NCA4Mi4yNjY2NyAyMy4zOTk5OTQgNTQuNTMzMzMzIDUwLjQ2NjY3NSBDIDQyLjEzMzMzNSA2Mi42MDAwMDYgMzYuNzk5OTk5IDY5LjI2NjY2MyAyOC40IDgzIEMgMTYuNCAxMDIuNDY2NjYgNy4yIDEyOC40NjY2NiA0LjY2NjY2NyAxNDkuNjY2NjcyIEMgMy42IDE1OC42MDAwMDYgMy40NjY2NjcgMTg2LjYwMDAwNiA0LjUzMzMzMyAxOTAuMDY2NjY2IEMgNC45MzMzMzMgMTkxLjI2NjY2MyA1LjQ2NjY2NyAxOTUuMTMzMzMxIDYgMTk4LjYwMDAwNiBDIDguMjY2NjY2IDIxNy4xMzMzMzEgMjAuNTMzMzMzIDI0Ny4xMzMzMzEgMzMuNTk5OTk4IDI2NS45MzMzNSBDIDQyLjI2NjY2NiAyNzguMzMzMzQ0IDU4Ljc5OTk5OSAyOTUuNTMzMzI1IDcxLjMzMzMzNiAzMDQuNzMzMzM3IEMgOTAuOTMzMzM0IDMxOS4xMzMzMzEgMTE3Ljg2NjY2OSAzMzAuNzMzMzM3IDE0MiAzMzUgQyAxNTMuMzMzMzI4IDMzNyAxODMuMzMzMzI4IDMzNy45MzMzMTkgMTkwLjY2NjY3MiAzMzYuMzMzMzQ0IEMgMTkyLjM5OTk5NCAzMzYuMDY2NjgxIDE5NiAzMzUuMzk5OTk0IDE5OC42NjY2NzIgMzM1IEMgMjQ4LjkzMzMzNCAzMjcuMzk5OTk0IDI5Ni41MzMzMjUgMjkyLjIwMDAxMiAzMjAgMjQ1LjI2NjY2MyBDIDMyNS42MDAwMDYgMjM0LjA2NjY2NiAzMzIuNjY2NjU2IDIxNC40NjY2NzUgMzM0IDIwNi4zMzMzMjggQyAzMzQuMzk5OTk0IDIwMy44MDAwMDMgMzM1LjA2NjY4MSAyMDAuNzMzMzM3IDMzNS4zMzMzNDQgMTk5LjY2NjY3MiBDIDMzNi41MzMzMjUgMTk0Ljg2NjY2OSAzMzcuNzMzMzM3IDE3OS4yNjY2NjMgMzM3LjYwMDAwNiAxNjcuNTMzMzQgQyAzMzcuMjAwMDEyIDEyNC43MzMzMzcgMzE5LjQ2NjY3NSA4MyAyODguNTMzMzI1IDUyLjMzMzM0NCBDIDI2NS4wNjY2ODEgMjkgMjM2LjUzMzM0IDEzLjM5OTk5NCAyMDUuODY2NjY5IDcgQyAxOTYuNTMzMzQgNSAxOTEuNDY2NjYgNC40NjY2NzUgMTczLjMzMzMyOCAzLjI2NjY2MyBDIDE3MC44MDAwMDMgMyAxNjMuNjAwMDA2IDMuMzk5OTk0IDE1Ny4zMzMzMjggMy45MzMzMTkgWiBNIDE4Ny40NjY2NiAzMi4yMDAwMTIgQyAyMzMuNjAwMDA2IDM3LjUzMzMyNSAyNzUuMjAwMDEyIDY3LjM5OTk5NCAyOTYgMTEwLjMzMzMyOCBDIDMxNy43MzMzMzcgMTU1IDMxMy42MDAwMDYgMjA3LjM5OTk5NCAyODQuOTMzMzE5IDI0OS42NjY2NTYgQyAyNzcuODY2NjY5IDI2MC4wNjY2NSAyNjAuMTMzMzMxIDI3Ny43OTk5ODggMjUwIDI4NC42MDAwMDYgQyAyMzAuODAwMDAzIDI5Ny41MzMzMjUgMjE0IDMwNC4wNjY2NSAxODkuNDY2NjYgMzA4LjMzMzM0NCBDIDE4Mi41MzMzNCAzMDkuNTMzMzI1IDE2MC4yNjY2NjMgMzA5LjUzMzMyNSAxNTMuMzMzMzI4IDMwOC4zMzMzNDQgQyAxMzcuNjAwMDA2IDMwNS42NjY2NTYgMTM0LjY2NjY3MiAzMDUgMTI2IDMwMi4wNjY2NSBDIDEwMS4wNjY2NjYgMjkzLjUzMzMyNSA3Ny4xOTk5OTcgMjc2LjYwMDAwNiA2MS43MzMzMzQgMjU2LjQ2NjY3NSBDIDU1LjIwMDAwMSAyNDguMTk5OTk3IDU0LjUzMzMzMyAyNDcuMTMzMzMxIDQ4LjkzMzMzNCAyMzcuNTMzMzI1IEMgNDQuNjY2NjY4IDIzMC4xOTk5OTcgMzcuMzMzMzMyIDIxMi40NjY2NiAzNy4zMzMzMzIgMjA5LjM5OTk5NCBDIDM3LjMzMzMzMiAyMDcuOTMzMzM0IDM2LjY2NjY2OCAyMDYuMTk5OTk3IDM1LjczMzMzNCAyMDUuMjY2NjYzIEMgMzQuNzk5OTk5IDIwNC4zMzMzMjggMzQuNTMzMzMzIDIwMy42NjY2NzIgMzQuOTMzMzM0IDIwMy42NjY2NzIgQyAzNS40NjY2NjcgMjAzLjY2NjY3MiAzNS4zMzMzMzIgMjAxLjgwMDAwMyAzNC42NjY2NjggMTk5LjUzMzM0IEMgMzAuOTMzMzMyIDE4Ni43MzMzMzcgMzAuNzk5OTk5IDE1OC4xOTk5OTcgMzQuMjY2NjY2IDE0Mi4zMzMzMjggQyA0OS43MzMzMzQgNzEuMTMzMzMxIDExNS4xOTk5OTcgMjQuMDY2NjgxIDE4Ny40NjY2NiAzMi4yMDAwMTIgWiIvPgogICAgICAgIDxwYXRoIGlkPSJwYXRoMSIgZmlsbD0iI2Y1OWQxNCIgc3Ryb2tlPSJub25lIiBkPSJNIDIwNy4wNjY2NjYgNzkuMTMzMzMxIEMgMTkwLjY2NjY3MiA4Mi40NjY2NzUgMTc2LjkzMzMzNCA5Mi44NjY2NjkgMTcwIDEwNy4xMzMzMzEgQyAxNjYuNTMzMzQgMTE0LjA2NjY2NiAxNjYuMTMzMzMxIDExNi40NjY2NiAxNjYuMTMzMzMxIDEyNyBDIDE2Ni4xMzMzMzEgMTM2LjQ2NjY2IDE2Ni42NjY2NzIgMTQwLjMzMzMyOCAxNjguOTMzMzM0IDE0NS4zOTk5OTQgTCAxNzEuODY2NjY5IDE1MS42NjY2NzIgTCAxNjguOTMzMzM0IDE1MC4wNjY2NjYgQyAxNTYuOTMzMzM0IDE0My42NjY2NzIgMTM0LjY2NjY3MiAxNDQuNzMzMzM3IDEyMi45MzMzMzQgMTUyLjQ2NjY2IEMgMTIwLjEzMzMzMSAxNTQuMzMzMzI4IDExOS4zMzMzMzYgMTU0LjE5OTk5NyAxMTEuNTk5OTk4IDE1MC4zMzMzMjggQyA4OC44MDAwMDMgMTM5LjEzMzMzMSA2MS40NjY2NjcgMTQ4LjE5OTk5NyA0OS41OTk5OTggMTcwLjg2NjY2OSBDIDQ2LjEzMzMzNSAxNzcuMzk5OTk0IDQ2IDE3OC42MDAwMDYgNDUuNTk5OTk4IDIwMi4zMzMzMjggQyA0NS4yMDAwMDEgMjI1LjM5OTk5NCA0NS4zMzMzMzIgMjI3LjI2NjY2MyA0OCAyMzEuMzk5OTk0IEMgNTAuNzk5OTk5IDIzNS45MzMzMzQgNTcuNTk5OTk4IDIzOS42NjY2NTYgNjIuNzk5OTk5IDIzOS42NjY2NTYgQyA2Ny4xOTk5OTcgMjM5LjY2NjY1NiA3NC4yNjY2NyAyMzUuODAwMDAzIDc2LjkzMzMzNCAyMzEuOTMzMzM0IEMgNzguOTMzMzM0IDIyOC44NjY2NjkgNzkuMzMzMzM2IDIyNC43MzMzMzcgNzkuNTk5OTk4IDIwNi4zMzMzMjggQyA4MCAxODUuNjY2NjcyIDgwLjI2NjY3IDE4NC4xOTk5OTcgODMuMDY2NjY2IDE4MS4zOTk5OTQgQyA4Ny44NjY2NjkgMTc2LjczMzMzNyA5NC42NjY2NjQgMTc2Ljg2NjY2OSA5OS4zMzMzMzYgMTgxLjY2NjY3MiBDIDEwMi41MzMzMzMgMTg0Ljg2NjY2OSAxMDIuNjY2NjY0IDE4NS4zOTk5OTQgMTAyLjY2NjY2NCAyMDUuOTMzMzM0IEMgMTAyLjY2NjY2NCAyMjQuNzMzMzM3IDEwMi45MzMzMzQgMjI3LjUzMzMyNSAxMDUuMzMzMzM2IDIzMS4zOTk5OTQgQyAxMDkuODY2NjY5IDIzOC44NjY2NjkgMTIwLjI2NjY3IDI0MS42NjY2NTYgMTI3LjU5OTk5OCAyMzcuNTMzMzI1IEMgMTM2IDIzMi43MzMzMzcgMTM2LjY2NjY3MiAyMzAuNDY2Njc1IDEzNi45MzMzMzQgMjA2LjMzMzMyOCBDIDEzNy4zMzMzMjggMTg1LjI2NjY2MyAxMzcuNDY2NjYgMTg0LjMzMzMyOCAxNDAuNTMzMzQgMTgxLjI2NjY2MyBDIDE0NC45MzMzMzQgMTc2LjczMzMzNyAxNTIuODAwMDAzIDE3Ni44NjY2NjkgMTU2LjgwMDAwMyAxODEuMzk5OTk0IEMgMTU5LjMzMzMyOCAxODQuNDY2NjYgMTU5LjYwMDAwNiAxODYuMzMzMzI4IDE1OS43MzMzMzcgMjA1LjY2NjY3MiBDIDE1OS44NjY2NjkgMjI5IDE2MC45MzMzMzQgMjMyLjczMzMzNyAxNjkuMDY2NjY2IDIzNy4zOTk5OTQgQyAxNzQuMjY2NjYzIDI0MC40NjY2NzUgMTgzLjQ2NjY2IDIzOS42NjY2NTYgMTg3Ljg2NjY2OSAyMzUuODAwMDAzIEMgMTkwLjUzMzM0IDIzMy4zOTk5OTQgMTkwLjkzMzMzNCAyMzMuMzk5OTk0IDE5Ny44NjY2NjkgMjM1LjgwMDAwMyBDIDIxNy44NjY2NjkgMjQyLjMzMzM0NCAyMzguOTMzMzM0IDI0MS4xMzMzMzEgMjU2LjY2NjY1NiAyMzIuMzMzMzQ0IEMgMjc5LjMzMzM0NCAyMjEuMjY2NjYzIDI5MC4xMzMzMzEgMTk5LjUzMzM0IDI4NC42NjY2NTYgMTc2LjMzMzMyOCBDIDI4MCAxNTYuMTk5OTk3IDI2NS4zMzMzNDQgMTQ1LjY2NjY3MiAyMjYuOTMzMzM0IDEzNSBDIDIxMy40NjY2NiAxMzEuMjY2NjYzIDIwOS4zMzMzMjggMTI4LjczMzMzNyAyMDkuMzMzMzI4IDEyNC4zMzMzMjggQyAyMDkuMzMzMzI4IDExOS42NjY2NzIgMjE0LjkzMzMzNCAxMTcuMTMzMzMxIDIyMy44NjY2NjkgMTE3LjY2NjY3MiBDIDIyOS4zMzMzMjggMTE4LjA2NjY2NiAyMzMuMzMzMzI4IDExOS42NjY2NzIgMjQxLjYwMDAwNiAxMjQuNDY2NjYgQyAyNTQuMTMzMzMxIDEzMS44MDAwMDMgMjYyLjEzMzMzMSAxMzMuMjY2NjYzIDI2OS44NjY2NjkgMTI5LjY2NjY3MiBDIDI4NCAxMjIuODY2NjY5IDI4NC43OTk5ODggMTA1LjUzMzM0IDI3MS4zMzMzNDQgOTMuMTMzMzMxIEMgMjYwLjUzMzMyNSA4My4xMzMzMzEgMjQ2LjgwMDAwMyA3OC4zMzMzNDQgMjI3LjYwMDAwNiA3Ny42NjY2NTYgQyAyMjAuODAwMDAzIDc3LjUzMzMyNSAyMTEuNjAwMDA2IDc4LjA2NjY4MSAyMDcuMDY2NjY2IDc5LjEzMzMzMSBaIE0gMjE3LjQ2NjY2IDE3Ni4zMzMzMjggQyAyMzQuMjY2NjYzIDE4MC43MzMzMzcgMjM5Ljg2NjY2OSAxODMuMzk5OTk0IDI0MC44MDAwMDMgMTg3LjI2NjY2MyBDIDI0Mi42NjY2NzIgMTk0LjYwMDAwNiAyMzYuNTMzMzQgMTk5IDIyMy44NjY2NjkgMTk5IEMgMjEzLjg2NjY2OSAxOTkgMjEwLjI2NjY2MyAxOTcuNTMzMzQgMjAwLjUzMzM0IDE4OS4yNjY2NjMgQyAxOTUuNjAwMDA2IDE4NS4yNjY2NjMgMTkzLjMzMzMyOCAxODIuMzMzMzI4IDE5Mi44MDAwMDMgMTc5LjI2NjY2MyBDIDE5Mi4zOTk5OTQgMTc2Ljg2NjY2OSAxOTAuOTMzMzM0IDE3Mi43MzMzMzcgMTg5LjYwMDAwNiAxNzAuMTk5OTk3IEwgMTg3LjE5OTk5NyAxNjUuNTMzMzQgTCAxOTYuMTMzMzMxIDE2OS4yNjY2NjMgQyAyMDAuOTMzMzM0IDE3MS4yNjY2NjMgMjEwLjY2NjY3MiAxNzQuNDY2NjYgMjE3LjQ2NjY2IDE3Ni4zMzMzMjggWiIvPgogICAgPC9nPgo8L3N2Zz4K' width="42" height="42">
 			<a class="tablinks" id="defaultOpen" onclick="doTab(event, 'tab_messages')" href="#"> messages </a>
 			<a class="tablinks" onclick="doTab(event, 'tab_info')" href="#"> info </a>
+			<a class="tablinks" onclick="doTab(event, 'tab_nodes')" href="#"> nodes </a>
 			<span class="title">MySensors Wifi Gateway</span>
 			<a href="javascript:void(0);" class="drawer" onclick="openDrawerMenu()">&#9776;</a>
 		</div>
@@ -161,6 +327,8 @@ const char index_html[] PROGMEM = R"=====(
 	</div>
 </section>    
 
+<hr class="separator separator--dots" />
+
 <section id="tab_messages" class="tabcontent">
 	<div class="row">
 		<div class="tooltip">
@@ -170,11 +338,67 @@ const char index_html[] PROGMEM = R"=====(
 	</div>
 </section>    
 
+<section id="tab_nodes" class="tabcontent">
+	<div class="row">
+		<div class="col-25">
+			<label for="nodeId">node id</label>
+		</div>
+		<div class="col-25">
+			<input id="nodeId" type="text" value="" placeholder="e.g. 99">
+		</div>
+		<div class="col-25">
+			<label for="nodeName">name</label>
+		</div>
+		<div class="col-25">
+			<input id="nodeName" type="text" value="" placeholder="e.g. Living Room">
+		</div>
+	</div>
+	<div class="row">
+		<input type="button" value="save name" onclick="saveNodeName()">
+	</div>
+	<div class="row">
+		<div id="nodeNamesTable">&nbsp;</div>
+	</div>
+</section>
+
+<hr class="separator separator--dots" />
+
+<section>
+	<div class="row">
+		<span class="statusBadge" id="wifiBadge">WiFi: ?</span>
+		<span class="statusBadge" id="rssiBadge">RSSI: ?</span>
+		<span class="statusBadge" id="heapBadge">Heap: ?</span>
+		<span class="statusBadge" id="fragBadge">Frag: ?</span>
+		<span class="statusBadge" id="ctrlBadge">GW rx/tx: ?</span>
+	</div>
+	<div class="row">
+		<canvas id="diagChart" width="600" height="80"></canvas>
+	</div>
+</section>
+
+<hr class="separator separator--dots" />
+
 <section>    
 	<div class="row">
 		<div id="led"></div>
-		<div class="debug" id="debug"></div>
-		<div class="debug" id="indicator"></div>
+		<div class="row">
+			<input type="button" value="all" onclick="setLogLevel('info')">
+			<input type="button" value="warn+" onclick="setLogLevel('warn')">
+			<input type="button" value="errors" onclick="setLogLevel('error')">
+			<span id="logLevel">Log level: info</span>
+		</div>
+		<table class="diagTable">
+			<tbody>
+				<tr>
+					<td class="diagLabel">debug</td>
+					<td class="diagLine" id="debug"></td>
+				</tr>
+				<tr>
+					<td class="diagLabel">indicator</td>
+					<td class="diagLine" id="indicator"></td>
+				</tr>
+			</tbody>
+		</table>
 	</div>
 </section>
 </body>

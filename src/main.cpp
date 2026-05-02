@@ -33,6 +33,7 @@ extern "C" {
 #include "common.h"
 #include "uptime.h"
 #include "mysensors_types.h"
+#include "diagnostics_ui.h"
 
 // MQTT Gateway
 // https://github.com/mysensors/MySensors/blob/master/examples/GatewayESP8266MQTTClient/GatewayESP8266MQTTClient.ino
@@ -43,7 +44,7 @@ extern "C" {
 
 //#define MAX_MESSAGE_SIZE  (32u) 
 // dic: extended debugging
-//#define MY_DEBUG_VERBOSE
+#define MY_DEBUG_VERBOSE
 
 // Use a bit lower baudrate for serial prints on ESP8266 than default in MyConfig.h
 #define MY_BAUD_RATE 9600
@@ -107,11 +108,11 @@ extern "C" {
 
 // How many clients should be able to connect to this gateway (default 1)
 // https://forum.mysensors.org/topic/2712/my_gateway_max_clients
-#define MY_GATEWAY_MAX_CLIENTS 4 // (geändert 21.2.24 2 auf 4// 2.5.2019, vorher 3)
+#define MY_GATEWAY_MAX_CLIENTS 4 // allow HA + fallback client as before
 
 // Controller ip address. Enables client mode (default is "server" mode).
 // Also enable this if MY_USE_UDP is used and you want sensor data sent somewhere.
-// #define MY_CONTROLLER_IP_ADDRESS 192, 168, 2, 68
+// #define MY_CONTROLLER_IP_ADDRESS 192, 168, 2, 222
 
 // Enable inclusion mode
 #define MY_INCLUSION_MODE_FEATURE
@@ -792,18 +793,159 @@ void receive(const MyMessage &message)
  *
  */
 int counter = 0;
+static unsigned long wifiReconnectFirstFailMs = 0;
+static unsigned long wifiLastBeginMs = 0;
+static wl_status_t wifiLastStatus = WL_IDLE_STATUS;
+static unsigned long lastIndicatorMs = 0;
+static int lastIndicatorCode = -1;
+
+WiFiEventHandler wifiDisconnectHandler;
+WiFiEventHandler wifiGotIpHandler;
+
+static const unsigned long WIFI_BEGIN_INTERVAL_MS = 15000UL;          // retry WiFi.begin every 15s
+static const unsigned long WIFI_RECONNECT_TIMEOUT_MS = 1000UL * 60UL * 3UL; // restart only after 3 minutes
+
+const char *wifiStatusToString(wl_status_t status)
+{
+	switch (status)
+	{
+	case WL_IDLE_STATUS: return "WL_IDLE_STATUS";
+	case WL_NO_SSID_AVAIL: return "WL_NO_SSID_AVAIL";
+	case WL_SCAN_COMPLETED: return "WL_SCAN_COMPLETED";
+	case WL_CONNECTED: return "WL_CONNECTED";
+	case WL_CONNECT_FAILED: return "WL_CONNECT_FAILED";
+	case WL_CONNECTION_LOST: return "WL_CONNECTION_LOST";
+	case WL_DISCONNECTED: return "WL_DISCONNECTED";
+	default: return "WL_UNKNOWN";
+	}
+}
+
+const char *wifiDisconnectReasonToString(uint8_t reason)
+{
+	switch (reason)
+	{
+	case 1: return "UNSPECIFIED";
+	case 2: return "AUTH_EXPIRE";
+	case 3: return "AUTH_LEAVE";
+	case 4: return "ASSOC_EXPIRE";
+	case 5: return "ASSOC_TOOMANY";
+	case 6: return "NOT_AUTHED";
+	case 7: return "NOT_ASSOCED";
+	case 8: return "ASSOC_LEAVE";
+	case 9: return "ASSOC_NOT_AUTHED";
+	case 10: return "DISASSOC_PWRCAP_BAD";
+	case 11: return "DISASSOC_SUPCHAN_BAD";
+	case 13: return "IE_INVALID";
+	case 14: return "MIC_FAILURE";
+	case 15: return "4WAY_HANDSHAKE_TIMEOUT";
+	case 16: return "GROUP_KEY_UPDATE_TIMEOUT";
+	case 17: return "IE_IN_4WAY_DIFFERS";
+	case 18: return "GROUP_CIPHER_INVALID";
+	case 19: return "PAIRWISE_CIPHER_INVALID";
+	case 20: return "AKMP_INVALID";
+	case 21: return "UNSUPP_RSN_IE_VERSION";
+	case 22: return "INVALID_RSN_IE_CAP";
+	case 23: return "802_1X_AUTH_FAILED";
+	case 24: return "CIPHER_SUITE_REJECTED";
+	case 200: return "BEACON_TIMEOUT";
+	case 201: return "NO_AP_FOUND";
+	case 202: return "AUTH_FAIL";
+	case 203: return "ASSOC_FAIL";
+	case 204: return "HANDSHAKE_TIMEOUT";
+	default: return "UNKNOWN";
+	}
+}
+
+void logWifiStatus(const char *reason)
+{
+	wl_status_t status = WiFi.status();
+	dbgprintf(ico_warning,
+			  "[WiFi] %s | status=%s (%d) | RSSI=%d dBm | SSID=%s | IP=%s",
+			  reason,
+			  wifiStatusToString(status),
+			  static_cast<int>(status),
+			  WiFi.RSSI(),
+			  WiFi.SSID().c_str(),
+			  WiFi.localIP().toString().c_str());
+}
+
+void setupWifiEventLogging()
+{
+	wifiDisconnectHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected &event) {
+		dbgprintf(ico_error,
+				  "[WiFiEvt] disconnected | reason=%u (%s) | ssid=%s | status=%s (%d) | RSSI=%d",
+				  event.reason,
+				  wifiDisconnectReasonToString(event.reason),
+				  event.ssid.c_str(),
+				  wifiStatusToString(WiFi.status()),
+				  static_cast<int>(WiFi.status()),
+				  WiFi.RSSI());
+	});
+
+	wifiGotIpHandler = WiFi.onStationModeGotIP([](const WiFiEventStationModeGotIP &event) {
+		dbgprintf(ico_ok,
+				  "[WiFiEvt] got-ip | ip=%s | gw=%s | mask=%s | status=%s (%d) | RSSI=%d",
+				  event.ip.toString().c_str(),
+				  event.gw.toString().c_str(),
+				  event.mask.toString().c_str(),
+				  wifiStatusToString(WiFi.status()),
+				  static_cast<int>(WiFi.status()),
+				  WiFi.RSSI());
+	});
+}
+
 void loop_Wifi()
 {
-	dbgprintln(ico_info, "loop_Wifi()");
-#ifdef MY_CORE_ONLY
-	WiFi.begin(MY_WIFI_SSID, MY_WIFI_PASSWORD);
-#else
-	WiFi.begin();
-#endif
-	delay(500);
-	// WiFi.printDiag(Serial);
-	if (++counter > 50)
+	const unsigned long now = millis();
+	const wl_status_t status = WiFi.status();
+
+	// connected again: clear reconnect state
+	if (status == WL_CONNECTED)
 	{
+		if (wifiReconnectFirstFailMs != 0)
+		{
+			logWifiStatus("reconnected");
+		}
+		wifiReconnectFirstFailMs = 0;
+		wifiLastBeginMs = 0;
+		counter = 0;
+		wifiLastStatus = status;
+		return;
+	}
+
+	if (wifiReconnectFirstFailMs == 0)
+	{
+		wifiReconnectFirstFailMs = now;
+		logWifiStatus("connection lost - starting reconnect sequence");
+	}
+
+	// log status transitions for diagnostics
+	if (status != wifiLastStatus)
+	{
+		logWifiStatus("status changed");
+		wifiLastStatus = status;
+	}
+
+	// avoid WiFi.begin() spam; retry periodically
+	if (wifiLastBeginMs == 0 || (now - wifiLastBeginMs) >= WIFI_BEGIN_INTERVAL_MS)
+	{
+		dbgprintln(ico_info, "[WiFi] calling WiFi.begin()");
+#ifdef MY_CORE_ONLY
+		WiFi.begin(MY_WIFI_SSID, MY_WIFI_PASSWORD);
+#else
+		WiFi.begin();
+#endif
+		wifiLastBeginMs = now;
+		counter++;
+	}
+
+	yield();
+	delay(10);
+
+	// very last resort, with long timeout
+	if ((now - wifiReconnectFirstFailMs) >= WIFI_RECONNECT_TIMEOUT_MS)
+	{
+		logWifiStatus("reconnect timeout reached - restarting");
 		ESP.restart();
 	}
 }
@@ -958,6 +1100,9 @@ void loop_NTP()
 //
 void indication(const indication_t indicator)
 {
+	lastIndicatorCode = static_cast<int>(indicator);
+	lastIndicatorMs = millis();
+
 	switch (indicator)
 	{
 	case INDICATION_GW_TX:
@@ -991,20 +1136,24 @@ void indication(const indication_t indicator)
 		break;
 	};
 
-	static char mysIndication[32]; // = {'\0'};
-	if (indicator > 3 && indicator < 19)
+	const char *mysIndication = "";
+	if (indicator <= 18)
 	{
-		strcpy(mysIndication, mysIndicationErrorCodes0[indicator]);
+		mysIndication = mysIndicationErrorCodes0[indicator];
 	}
-	if (indicator > 100)
+	else if (indicator >= 101 && indicator <= 116)
 	{
-		strcpy(mysIndication, mysIndicationErrorCodes100[indicator - 101]);
+		mysIndication = mysIndicationErrorCodes100[indicator - 101];
 		indicatorTxErrors++;
+	}
+	else
+	{
+		mysIndication = "Unknown indication";
 	}
 
 	char msgbuf[128] = {'\0'};
 	if (snprintf(msgbuf, sizeof(msgbuf),
-				 "%s<br />gateway: rx: %lu - tx: %lu <br />sensors: rx: %lu - tx: %lu <br />errors: %lu",
+				 "%s | gateway: rx: %lu - tx: %lu  | sensors: rx: %lu - tx: %lu  | errors: %lu <br />",
 				 mysIndication,
 				 // indicator,
 				 gatewayRxMessage,
@@ -1017,6 +1166,18 @@ void indication(const indication_t indicator)
 	}
 	send_Event(msgbuf, "indicator");
 	// dbgprintln(ico_info, msgbuf);
+
+	dbgprintf(ico_info,
+			  "[INDICATION] code=%d | text=%s | gw(rx=%lu tx=%lu) sensor(rx=%lu tx=%lu) errors=%lu | wifi=%s (%d)",
+			  static_cast<int>(indicator),
+			  mysIndication,
+			  gatewayRxMessage,
+			  gatewayTxMessage,
+			  sensorRxMessage,
+			  sensorTxMessage,
+			  indicatorTxErrors,
+			  wifiStatusToString(WiFi.status()),
+			  static_cast<int>(WiFi.status()));
 }
 
 
@@ -1041,13 +1202,13 @@ void setup()
 	} // Wait
 
 	Serial.println("---------- begin setup()");
-    Serial.println(FRIENDLY_PROJECT_NAME " svn:" SVN_REV);
-    Serial.println(VERSION "compiled " __DATE__ " " __TIME__);
+	Serial.printf("Build: %s %s\n", __DATE__, __TIME__);
+	Serial.printf("SW version: %s\n", __SWVERSION__);
 	
 	// esp8266
-	Serial.printf("Reset reason %s\n",resetInfo->reason);
-	// esp32
-    Serial.printf("Reset reason %s\n",reset_reasons[rtc_reset_reason]);
+	Serial.printf("Reset reason code: %d\n", resetInfo->reason);
+	Serial.printf("Reset reason text: %s\n", ESP.getResetReason().c_str());
+	Serial.printf("Reset info: %s\n", ESP.getResetInfo().c_str());
 #endif
 
 	cpuLastMicros = micros();
@@ -1065,6 +1226,8 @@ void setup()
 #ifdef NTP
 	configTime(TZ_INFO, NTP_SERVER[0], NTP_SERVER[1], NTP_SERVER[2]); // check TZ.h, find your location
 #endif																  // NTP
+
+	setupWifiEventLogging();
 
 #ifdef WWW
 	setup_WebServer();
@@ -1179,7 +1342,7 @@ void loop()
 
 		char buf[128];
 		if (snprintf(buf, sizeof(buf),
-					 "%s<br />%s<br />cycle: %lu &mu;s<br />heap: %s / fragm: %u%% / blocks: %u",
+					 "%s | %s | cycle: %lu &mu;s | heap: %s | fragm: %u%% | blocks: %u<br />",
 					 timestamp,
 					 runtime(),
 					 getCpuDelta(),
@@ -1192,6 +1355,38 @@ void loop()
 		send_Event(buf, "debug");
 		timestamp[0] = {'\0'};
 		buf[0] = {'\0'};
+
+		String telem = buildTelemetryJson(
+			heap,
+			ESP.getHeapFragmentation(),
+			ESP.getMaxFreeBlockSize(),
+			WiFi.RSSI(),
+			String(wifiStatusToString(WiFi.status())),
+			lastIndicatorCode,
+			gatewayRxMessage,
+			gatewayTxMessage,
+			sensorRxMessage,
+			sensorTxMessage,
+			indicatorTxErrors);
+		send_Event(telem.c_str(), "telemetry");
+
+		static unsigned long lastControllerDiagMs = 0;
+		if (millis() - lastControllerDiagMs > 30000UL)
+		{
+			lastControllerDiagMs = millis();
+			dbgprintf(ico_info,
+					  "[CTRL-DIAG] WiFi=%s(%d) RSSI=%d SSID=%s IP=%s heap=%lu frag=%u maxblk=%u lastInd=%d (%lums ago)",
+					  wifiStatusToString(WiFi.status()),
+					  static_cast<int>(WiFi.status()),
+					  WiFi.RSSI(),
+					  WiFi.SSID().c_str(),
+					  WiFi.localIP().toString().c_str(),
+					  system_get_free_heap_size(),
+					  ESP.getHeapFragmentation(),
+					  ESP.getMaxFreeBlockSize(),
+					  lastIndicatorCode,
+					  (lastIndicatorMs == 0 ? 0UL : millis() - lastIndicatorMs));
+		}
 
 		updateWebStats();
 	}

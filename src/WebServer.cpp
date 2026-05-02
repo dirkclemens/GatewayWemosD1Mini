@@ -22,6 +22,8 @@
 
 AsyncWebServer server(80);
 AsyncEventSource events("/events");
+static const char *NODE_NAMES_FILE = "/node_names.txt";
+static String nodeNames[256];
 
 // because SPIFFS is deprecated
 #include <LittleFS.h>
@@ -31,12 +33,112 @@ AsyncEventSource events("/events");
 //flag to use from web update to reboot the ESP
 bool shouldReboot 							= false;
 
+static String trimCopy(const String &in)
+{
+	String s = in;
+	s.trim();
+	return s;
+}
+
+static void loadNodeNames()
+{
+	for (uint16_t i = 0; i < 256; i++) {
+		nodeNames[i] = "";
+	}
+	if (!LittleFS.begin()) {
+		dbgprintln(ico_error, "could not open LittleFS for node name loading");
+		return;
+	}
+	if (!LittleFS.exists(NODE_NAMES_FILE)) {
+		return;
+	}
+	File file = LittleFS.open(NODE_NAMES_FILE, "r");
+	if (!file) {
+		dbgprintln(ico_error, "could not open node_names.txt");
+		return;
+	}
+	while (file.available()) {
+		String line = file.readStringUntil('\n');
+		line.trim();
+		if (!line.length()) {
+			continue;
+		}
+		int sep = line.indexOf('=');
+		if (sep <= 0) {
+			continue;
+		}
+		String idPart = trimCopy(line.substring(0, sep));
+		String namePart = trimCopy(line.substring(sep + 1));
+		int id = idPart.toInt();
+		if (id >= 0 && id <= 255 && namePart.length()) {
+			if (namePart.length() > 31) {
+				namePart = namePart.substring(0, 31);
+			}
+			nodeNames[id] = namePart;
+		}
+	}
+	file.close();
+}
+
+static bool saveNodeNames()
+{
+	if (!LittleFS.begin()) {
+		dbgprintln(ico_error, "could not open LittleFS for node name saving");
+		return false;
+	}
+	File file = LittleFS.open(NODE_NAMES_FILE, "w");
+	if (!file) {
+		dbgprintln(ico_error, "could not write node_names.txt");
+		return false;
+	}
+	for (uint16_t i = 0; i < 256; i++) {
+		if (nodeNames[i].length()) {
+			file.printf("%u=%s\n", i, nodeNames[i].c_str());
+		}
+	}
+	file.close();
+	return true;
+}
+
+static String nodeNamesAsJson()
+{
+	String out = "{";
+	bool first = true;
+	for (uint16_t i = 0; i < 256; i++) {
+		if (!nodeNames[i].length()) {
+			continue;
+		}
+		if (!first) {
+			out += ",";
+		}
+		first = false;
+		out += "\"";
+		out += i;
+		out += "\":\"";
+		String name = nodeNames[i];
+		name.replace("\\", "\\\\");
+		name.replace("\"", "\\\"");
+		out += name;
+		out += "\"";
+	}
+	out += "}";
+	return out;
+}
+
 /*
  *
  */
 void send_Event(const char *content, const char *section)
 {
 	events.send(content, section);
+}
+
+String getNodeNameById(uint8_t nodeId)
+{
+	if (nodeId <= 255 && nodeNames[nodeId].length()) {
+		return nodeNames[nodeId];
+	}
+	return String("");
 }
 
 
@@ -73,7 +175,7 @@ void send_Status(AsyncWebServerRequest *request)
 	uint32_t ideSize = ESP.getFlashChipSize();
 	FlashMode_t ideMode = ESP.getFlashChipMode();
 	uint8_t heapFragmentation = ESP.getHeapFragmentation();
-	uint8_t maxFreeBlocks = ESP.getMaxFreeBlockSize();
+	uint32_t maxFreeBlocks = ESP.getMaxFreeBlockSize();
 
 	AsyncResponseStream *resp = request->beginResponseStream("text/plain");
 	resp->print ("Status\n-----------------------------\n");
@@ -174,6 +276,7 @@ void setup_WebServer()
 {
 	// boolean fsOK = 
 	LittleFS.begin();// Filesystem mounten
+	loadNodeNames();
 
 	events.onConnect([](AsyncEventSourceClient *client) {
 		client->send("connected !", NULL, millis(), 1000);
@@ -210,6 +313,32 @@ void setup_WebServer()
 
 	server.on("/style.css", [](AsyncWebServerRequest *request){
 		request->send_P(200, "text/css", style_css, nullptr);
+	});
+
+	server.on("/api/node-names", HTTP_GET, [](AsyncWebServerRequest *request){
+		request->send(200, "application/json", nodeNamesAsJson());
+	});
+
+	server.on("/api/node-name", HTTP_POST, [](AsyncWebServerRequest *request){
+		if (!request->hasParam("id", true) || !request->hasParam("name", true)) {
+			request->send(400, "application/json", "{\"ok\":false,\"error\":\"missing id or name\"}");
+			return;
+		}
+
+		int id = request->getParam("id", true)->value().toInt();
+		String name = trimCopy(request->getParam("name", true)->value());
+
+		if (id < 0 || id > 255) {
+			request->send(400, "application/json", "{\"ok\":false,\"error\":\"id out of range\"}");
+			return;
+		}
+		if (name.length() > 31) {
+			name = name.substring(0, 31);
+		}
+
+		nodeNames[id] = name; // empty string removes alias
+		bool ok = saveNodeNames();
+		request->send(ok ? 200 : 500, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"save failed\"}");
 	});
 
 	server.on("/bootlog.txt", [](AsyncWebServerRequest *request){
@@ -302,5 +431,3 @@ void loop_WebServer()
 		ESP.restart();
 	}
 }
-
-
