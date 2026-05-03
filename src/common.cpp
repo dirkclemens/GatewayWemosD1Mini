@@ -11,7 +11,7 @@ const char *const PROGMEM flashChipMode[] = {"QIO", "QOUT", "DIO", "DOUT", "Unbe
 /* 
  *
  */
-void getCurrentTimeString(char *timestamp, const char *format)
+void getCurrentTimeString(char *timestamp, size_t timestampSize, const char *format)
 {
 	struct tm tm;
 	static char _timestr[21] = {'\0'}; // Aug 02 2020 12:34:56 => 20 + \0
@@ -20,7 +20,7 @@ void getCurrentTimeString(char *timestamp, const char *format)
 	localtime_r(&now, &tm);
 	// strftime(timestr, sizeof(timestr), "%Y.%m.%d %H:%M:%S", &tm); // http://www.cplusplus.com/reference/ctime/strftime/
 	strftime(_timestr, sizeof(_timestr), format, &tm); // http://www.cplusplus.com/reference/ctime/strftime/
-	strcpy(timestamp, _timestr);
+	snprintf(timestamp, timestampSize, "%s", _timestr);
 }
 
 // https://www.w3schools.com/charsets/ref_utf_dingbats.asp
@@ -61,7 +61,7 @@ void dbgprintf(dbgIcons icon, const char *format, ...)
 	}
 
 	char _timestr[24] = {'\0'};
-	getCurrentTimeString(_timestr, "%Y.%m.%d %H:%M:%S  -  ");
+	getCurrentTimeString(_timestr, sizeof(_timestr), "%Y.%m.%d %H:%M:%S  -  ");
 	Serial.print(_timestr);
 	Serial.print(uniicon);
 	Serial.println(sbuf); // and the info
@@ -72,7 +72,7 @@ void dbgprint(dbgIcons icon, const char *textbuf)
 {
 #ifdef MY_DEBUG
 	static char sbuf[1024] = {'\0'}; // For debug lines
-	strcpy(sbuf, textbuf);
+	snprintf(sbuf, sizeof(sbuf), "%s", textbuf ? textbuf : "");
 	static char uniicon[5];
 	switch (icon)
 	{
@@ -102,7 +102,7 @@ void dbgprint(dbgIcons icon, const char *textbuf)
 	}
 
 	char _timestr[24] = {'\0'};
-	getCurrentTimeString(_timestr, "%Y.%m.%d %H:%M:%S  -  ");
+	getCurrentTimeString(_timestr, sizeof(_timestr), "%Y.%m.%d %H:%M:%S  -  ");
 	Serial.print(_timestr);
 	Serial.print(uniicon);
 	Serial.print(sbuf); // and the info
@@ -124,9 +124,14 @@ void dbgprintln()
 #endif
 }
 
-const String formatBytes(size_t const &bytes)
-{ // lesbare Anzeige der Speichergrößen
-	return (bytes < 1024) ? String(bytes) + " Byte" : (bytes < (1024 * 1024)) ? String(bytes / 1024.0) + " KB" : String(bytes / 1024.0 / 1024.0) + " MB";
+void formatBytes(size_t bytes, char *buf, size_t buflen)
+{
+	if (bytes < 1024)
+		snprintf(buf, buflen, "%u Byte", (unsigned)bytes);
+	else if (bytes < (1024u * 1024u))
+		snprintf(buf, buflen, "%.1f KB", bytes / 1024.0f);
+	else
+		snprintf(buf, buflen, "%.2f MB", bytes / 1024.0f / 1024.0f);
 }
 
 char *ftoa(char *a, double f, int precision)

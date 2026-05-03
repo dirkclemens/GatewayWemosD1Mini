@@ -1,90 +1,142 @@
 # GatewayWemosD1Mini
 
-MySensors Gateway with logging using 
-* event-based responsive web ui and 
-* telnet interface and 
-* pushover.net notifications
+MySensors WiFi Gateway auf Basis des **Wemos D1 Mini (ESP8266)** mit moderner Web-UI, Telnet-Interface und Pushover-Benachrichtigungen.
 
-<img src="screenshot.png" width="500">    
+Version: **2.4.1**
 
-## config / credentials
+## Features
 
-Create a file "credentials.h" containing the following data
-```
-   #define MY_WIFI_SSID "ssid"
-   #define MY_WIFI_PASSWORD "******"
-   const char *_token = "******";   // for pushover.net 
-   const char *_user = "******";    // for pushover.net 
-```
+- 📡 **MySensors WiFi-Gateway** — empfängt nRF24L01+-Funknachrichten und leitet sie ins Netzwerk weiter
+- 🌐 **Moderne Single-Page Web-UI** (5 Tabs, Server-Sent Events, kein Polling)
+- 📟 **Telnet-Interface** für Live-Debugging
+- 🔔 **Pushover-Benachrichtigungen** (optional)
+- 🕐 **NTP-Zeitsynchronisation**
+- ⚡ **OTA-Updates** über PlatformIO oder `espota.py`
+- 💾 HTML/CSS/JS vollständig in PROGMEM (Flash) — kein RAM-Verbrauch für die UI
 
-## platformio
+## Web-UI
 
-   platformio.ini is available incl. OTA support and local serial debugging (using serial port)
+Die Web-Oberfläche ist über `http://<gateway-ip>/` erreichbar und enthält fünf Tabs:
 
-## cli   
-   `arduino-cli lib install MySensors`   
-   `arduino-cli compile -v --fqbn esp8266:esp8266:d1_mini /path/to/main.cpp (should be then better be renamed to *.ino)`
+| Tab | Inhalt |
+|-----|--------|
+| **📨 Messages** | Live-Tabelle der letzten 30 MySensors-Nachrichten (Zeit, Node, Sensor, Cmd, Typ, Payload) |
+| **📊 Sensors** | Pro-Node-Karten mit dem letzten empfangenen Wert (`C_SET`) je Sensor inkl. Zeitstempel — Daten leben im Browser-Cache, kein ESP-RAM |
+| **ℹ️ Info** | Gateway-Statistiken (Heap, RSSI, Rx/Tx-Zähler) + Aktionen: Reboot, Reconnect, Bootlog, Log löschen |
+| **🏷️ Nodes** | Node-Namen vergeben und verwalten (persistent auf dem Gateway gespeichert) |
+| **🔧 Debug** | Telemetrie-Badges, Heap/Frag-Chart, Log-Level-Filter, Debug- und Indicator-Log, LED-Status |
 
-### OTA: 
-        python espota.py -d  -i 192.168.2.221 -f /path/to/bin/GatewayWemosD1Mini.ino.bin
-   Serial: 
-```
-      ls /dev/cu.*   
-      ./esptool -vv -cd nodemcu -cb 115200 -cp /dev/cu.usbserial-1420 -ca 0x00000 -cf ./GatewayWemosD1Mini.ino.bin
-```
+### Screenshots
 
-## description 
-   The GatewayWemosD1Mini sends data received from sensors to the WiFi link.   
-   The gateway also accepts input on ethernet interface, which is then sent out to the radio network.   
+#### 📨 Messages
+![Messages Tab](screenshots/messages.png)
 
-   LED purposes:
-   * To use the feature, uncomment any of the MY_DEFAULT_xx_LED_PINs in your sketch, only the LEDs that is defined is used.
-   * RX (green) - blink fast on radio message recieved. In inclusion mode will blink fast only on presentation recieved
-   * TX (yellow) - blink fast on radio message transmitted. In inclusion mode will blink slowly
-   * ERR (red) - fast blink on error during transmission error or recieve crc error
+#### 📊 Sensors
+![Sensors Tab](screenshots/sensors.png)
 
-###   for wiring instructions, see    
-*   https://www.mysensors.org/build/esp8266_gateway
-*   https://www.mysensors.org/build/advanced_gateway
-*   https://github.com/mysensors/MySensors/blob/development/examples/GatewayESP8266OTA/GatewayESP8266OTA.ino
-*   https://github.com/mysensors/MySensors/blob/master/examples/GatewayESP8266/GatewayESP8266.ino
-*   https://www.wemos.cc/product/d1-mini.html
+#### ℹ️ Info
+![Info Tab](screenshots/info.png)
 
-### connecting the radio
+#### 🏷️ Nodes
+![Nodes Tab](screenshots/nodes.png)
 
-|   nRF24L01+  | ESP8266     |  Wemos D1 mini    | barebone | 
-| ----  | ---- | ---- | ---- |  
-|   VCC        |  VCC         |  VCC |  | 
-|   CE         |  GPIO4       |  D2 |  | 
-|   CSN/CS     |  GPIO15      |  D8    |            via 10K pulldown resistor to GND | 
-|   SCK        |  GPIO14      |  D5 |  | 
-|   MISO       |  GPIO12      |  D6 |  | 
-|   MOSI       |  GPIO13      |  D7 |  | 
-|   GND        |  GND         |  GND |  | 
-|              |  CH_PD       |         |           via 10K resistor to VCC | 
-|              |  GPIO2       |  D4        |        via 10K resistor to VCC | 
-|              |  GPIO0       |  D3           |     via 10K resistor to VCC, and via switch to GND ('bootload switch') | 
-|              |  GPIO16      |  D0              |  free | 
-|              |  GPIO5       |  D1               | free | 
+#### 🔧 Debug
+![Debug Tab](screenshots/debug.png)
 
-   Inclusion mode button:
-   - Connect GPIO5 via switch to GND ('inclusion switch')
+### Sensor-Tab
 
-   The "barebone" ESP modules, like ESP-12E, require a certain pin configuration to download code,
-   and another one to run code.
-   Connect REST (reset) via 10K pullup resistor to VCC, and via switch to GND ('reset switch')
-   Connect GPIO15 via 10K pulldown resistor to GND
-   Connect CH_PD via 10K resistor to VCC
-   Connect GPIO2 via 10K resistor to VCC
-   Connect GPIO0 via 10K resistor to VCC, and via switch to GND ('bootload switch')
+Alle eingehenden `C_SET`-Nachrichten werden im Browser-Speicher der aktuellen Session gehalten. Beim Wechsel zwischen Tabs bleiben die Daten erhalten. Es werden keine Messwerte auf dem ESP8266 gespeichert.
 
-   // Internal onboard LED is PIN 16
-```
-   #define MY_DEFAULT_ERR_LED_PIN D10  // Error led pin (Red)
-   #define MY_DEFAULT_RX_LED_PIN  D9  // Receive led pin (Yellow)
-   #define MY_DEFAULT_TX_LED_PIN  D1  // Transmit led pin (Green)
+## Konfiguration
+
+Datei `credentials.h` im `src/`-Verzeichnis erstellen:
+
+```cpp
+#define MY_WIFI_SSID     "ssid"
+#define MY_WIFI_PASSWORD "passwort"
+const char *_token = "...";   // Pushover API-Token
+const char *_user  = "...";   // Pushover User-Key
 ```
 
-## javascript hints
-*   https://stackoverflow.com/a/2931108/10590793
-*   https://stackoverflow.com/questions/1583123/circular-buffer-in-javascript
+Feature-Flags in `src/config.h`:
+
+```cpp
+#define OTA        // OTA-Updates aktivieren
+#define WWW        // Web-UI aktivieren (Port 80)
+#define TELNET     // Telnet-Interface (Port 23)
+#define NTP        // Zeitsynchronisation
+#define PUSHOVER   // Pushover-Benachrichtigungen
+```
+
+## Build & Flash
+
+**PlatformIO** (empfohlen):
+
+```bash
+pio run                          # kompilieren
+pio run -t upload                # seriell flashen
+pio run -e d1_mini_ota -t upload # OTA flashen
+```
+
+**OTA manuell:**
+
+```bash
+python espota.py -d -i 192.168.x.x -f .pio/build/d1_mini_ota/firmware.bin
+```
+
+**Seriell (esptool):**
+
+```bash
+ls /dev/cu.*
+./esptool -vv -cd nodemcu -cb 115200 -cp /dev/cu.usbserial-XXXX -ca 0x00000 -cf firmware.bin
+```
+
+### PlatformIO-Umgebungen
+
+| Umgebung | Beschreibung |
+|----------|-------------|
+| `d1_mini_ota` | Wemos D1 Mini, OTA-Upload (Standard) |
+| `d1_mini_serial` | Wemos D1 Mini, serieller Upload |
+| `d1_mini_pro_serial` | Wemos D1 Mini Pro, serieller Upload |
+
+## Hardware
+
+### LED-Belegung
+
+| LED | Farbe | Bedeutung |
+|-----|-------|-----------|
+| RX | grün | Blinkt bei empfangener Funknachricht |
+| TX | gelb | Blinkt bei gesendeter Funknachricht |
+| ERR | rot | Blinkt schnell bei Übertragungsfehler/CRC-Fehler |
+
+### nRF24L01+ Verkabelung
+
+| nRF24L01+ | ESP8266 | Wemos D1 mini | Hinweis |
+|-----------|---------|---------------|---------|
+| VCC | VCC | VCC | |
+| CE | GPIO4 | D2 | |
+| CSN/CS | GPIO15 | D8 | 10K Pulldown nach GND |
+| SCK | GPIO14 | D5 | |
+| MISO | GPIO12 | D6 | |
+| MOSI | GPIO13 | D7 | |
+| GND | GND | GND | |
+| — | CH_PD | — | 10K Pullup nach VCC |
+| — | GPIO2 | D4 | 10K Pullup nach VCC |
+| — | GPIO0 | D3 | 10K Pullup nach VCC + Taster nach GND (Bootload) |
+| — | GPIO16 | D0 | frei |
+| — | GPIO5 | D1 | Taster nach GND (Inclusion Mode) |
+
+Für Bare-ESP-Module (z. B. ESP-12E): RST via 10K Pullup nach VCC + Taster nach GND.
+
+```cpp
+#define MY_DEFAULT_ERR_LED_PIN D10  // Error LED (Rot)
+#define MY_DEFAULT_RX_LED_PIN  D9   // Receive LED (Gelb)
+#define MY_DEFAULT_TX_LED_PIN  D1   // Transmit LED (Grün)
+```
+
+## Ressourcen
+
+- [MySensors ESP8266 Gateway](https://www.mysensors.org/build/esp8266_gateway)
+- [MySensors Advanced Gateway](https://www.mysensors.org/build/advanced_gateway)
+- [Wemos D1 Mini](https://www.wemos.cc/product/d1-mini.html)
+- [ESPAsyncWebServer](https://github.com/me-no-dev/ESPAsyncWebServer)

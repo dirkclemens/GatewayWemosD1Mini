@@ -36,8 +36,8 @@ void setBootTime(){
 /* 
  *
  */ 
-String getBootTime(){
-    return (bootTime);
+const char* getBootTime(){
+    return bootTime;
 }
 
 
@@ -77,7 +77,7 @@ char *uptime(unsigned long milli){
     secs -= mins * 60;
     mins -= hours * 60;
     hours -= days * 24;
-    sprintf(_result, "%d days %2.2d:%2.2d:%2.2d", (int)days, (byte)hours, (byte)mins, (byte)secs);
+    snprintf(_result, sizeof(_result), "%d days %2.2d:%2.2d:%2.2d", (int)days, (byte)hours, (byte)mins, (byte)secs);
     return _result;
 }
 

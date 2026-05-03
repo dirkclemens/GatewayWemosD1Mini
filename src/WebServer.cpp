@@ -19,6 +19,7 @@
 #include <ESPAsyncTCP.h>
 #include <ESP8266mDNS.h>
 #include <ESPAsyncWebServer.h>
+#include <cstring>
 
 AsyncWebServer server(80);
 AsyncEventSource events("/events");
@@ -130,6 +131,21 @@ static String nodeNamesAsJson()
  */
 void send_Event(const char *content, const char *section)
 {
+	if (content == nullptr || section == nullptr || content[0] == '\0') {
+		return;
+	}
+	if (events.count() == 0) {
+		return;
+	}
+	// Drop low-priority bursts when client queues are already backed up.
+	const size_t packetsWaiting = events.avgPacketsWaiting();
+	if (packetsWaiting > 4 &&
+		(strcmp(section, "debug") == 0 ||
+		 strcmp(section, "telemetry") == 0 ||
+		 strcmp(section, "info") == 0 ||
+		 strcmp(section, "clients") == 0)) {
+		return;
+	}
 	events.send(content, section);
 }
 
@@ -198,7 +214,7 @@ void send_Status(AsyncWebServerRequest *request)
   	resp->printf("       reset reason: %s\n", RST_REASONS[resetInfo->reason]);
 	resp->println();
 
-	resp->printf("          boot time: %s\n", getBootTime().c_str());
+	resp->printf("          boot time: %s\n", getBootTime());
 	resp->printf("           hostname: %s\n", WiFi.hostname().c_str());
 	resp->printf("            runtime: %s\n", runtime());
 	resp->printf("             uptime: %s\n", uptime());
@@ -208,7 +224,7 @@ void send_Status(AsyncWebServerRequest *request)
 	resp->printf("               ssid: %s\n", WiFi.SSID().c_str());
 	resp->printf("         gateway ip: %s\n", WiFi.gatewayIP().toString().c_str());
 	resp->printf("        mac address: %s\n", WiFi.macAddress().c_str());
-	resp->printf("               rssi: %s\n", String(WiFi.RSSI()).c_str());
+		resp->printf("               rssi: %d\n", WiFi.RSSI());
 	resp->println();
 
 	// https://arduino-esp8266.readthedocs.io/en/latest/filesystem.html#file-object
@@ -230,8 +246,10 @@ void send_Status(AsyncWebServerRequest *request)
 
 		resp->print ("Files\n-----------------------------\n");
 		Dir dir = LittleFS.openDir("/");
-		while (dir.next()) {    
-			resp->printf("FS File: %s, size: %s\n",  dir.fileName().c_str(), formatBytes(dir.fileSize()).c_str());
+		while (dir.next()) {
+			char szBuf[12];
+			formatBytes(dir.fileSize(), szBuf, sizeof(szBuf));
+			resp->printf("FS File: %s, size: %s\n", dir.fileName().c_str(), szBuf);
 		}
 		resp->println();
 

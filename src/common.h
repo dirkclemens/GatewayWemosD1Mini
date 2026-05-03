@@ -20,10 +20,10 @@ enum dbgIcons {
 };
 
 // utilities
-void        dbgprint( dbgIcons icon, const char* textbuf );
-void        dbgprintln( );
-void        dbgprintln( dbgIcons icon, const char* textbuf );
-void        dbgprintf( dbgIcons icon, const char* format, ... );
-const String formatBytes(size_t const &bytes);
-char 		*ftoa(char *a, double f, int precision);
-void		getCurrentTimeString(char *timestamp, const char *format);
+void dbgprint( dbgIcons icon, const char* textbuf );
+void dbgprintln( );
+void dbgprintln( dbgIcons icon, const char* textbuf );
+void dbgprintf( dbgIcons icon, const char* format, ... );
+void formatBytes(size_t bytes, char *buf, size_t buflen);
+char *ftoa(char *a, double f, int precision);
+void getCurrentTimeString(char *timestamp, size_t timestampSize, const char *format);

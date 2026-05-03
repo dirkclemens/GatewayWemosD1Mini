@@ -456,15 +456,15 @@ void logBootTime()
 		}
 		else
 		{
-			String resetReason = "";
-			if (resetInfo.reason < 7) {
-				resetReason = reset_reasons_esp8266[resetInfo.reason];
-			} else {
-				resetReason = "Unknown Reset reason: " + String(resetInfo.reason);
-			}
+			char resetReason[48];
+			if (resetInfo.reason < 7)
+				strncpy(resetReason, reset_reasons_esp8266[resetInfo.reason], sizeof(resetReason) - 1);
+			else
+				snprintf(resetReason, sizeof(resetReason), "Unknown Reset reason: %u", resetInfo.reason);
+			resetReason[sizeof(resetReason) - 1] = '\0';
 
 			char buffer[64] = {'\0'};
-			if (snprintf(buffer, sizeof(buffer), "%s - %s", getBootTime().c_str(), resetReason.c_str()) < 0)
+			if (snprintf(buffer, sizeof(buffer), "%s - %s", getBootTime(), resetReason) < 0)
 			{
 				buffer[0] = '\0';
 			}
@@ -561,50 +561,52 @@ void setup_OTA()
 
 	http://www.cplusplus.com/reference/cstdio/printf/
  */
-void getMessagePayload(char *payload, MyMessage message)
+void getMessagePayload(char *payload, size_t payloadSize, MyMessage message)
 {
 	char _payload[2 * MAX_MESSAGE_SIZE -1 ] = {'\0'};
+	const uint8_t setReqUnitsCount = sizeof(mysSetReqUnits) / sizeof(mysSetReqUnits[0]);
+	const char *unit = (message.type < setReqUnitsCount) ? mysSetReqUnits[message.type] : "";
 	// mysensors_payload_t plt = ;
 	// DEBUG_PRINTF("getMessagePayload: %d - %d\n", message.getPayloadType(), message.type);
 	switch (message.getPayloadType())
 	{
 	case 0:
-		strcpy(payload, message.getString());
+		snprintf(payload, payloadSize, "%s", message.getString() ? message.getString() : "");
 		break;
 	case 1:
-		if (snprintf(_payload, sizeof(_payload), "%d %s", message.getByte(), (char *)mysSetReqUnits[message.type]) < 0) // Means append did not (entirely) fit
+		if (snprintf(_payload, sizeof(_payload), "%d %s", message.getByte(), unit) < 0) // Means append did not (entirely) fit
 		{
 			_payload[0] = '\0';
 		}
-		strcpy(payload, _payload);
+		snprintf(payload, payloadSize, "%s", _payload);
 		break;
 	case 2:
-		if (snprintf(_payload, sizeof(_payload), "%d %s", message.getInt(), (char *)mysSetReqUnits[message.type]) < 0) // Means append did not (entirely) fit
+		if (snprintf(_payload, sizeof(_payload), "%d %s", message.getInt(), unit) < 0) // Means append did not (entirely) fit
 		{
 			_payload[0] = '\0';
 		}
-		strcpy(payload, _payload);
+		snprintf(payload, payloadSize, "%s", _payload);
 		break;
 	case 3:
-		if (snprintf(_payload, sizeof(_payload), "%u %s", message.getUInt(), (char *)mysSetReqUnits[message.type]) < 0) // Means append did not (entirely) fit
+		if (snprintf(_payload, sizeof(_payload), "%u %s", message.getUInt(), unit) < 0) // Means append did not (entirely) fit
 		{
 			_payload[0] = '\0';
 		}
-		strcpy(payload, _payload);
+		snprintf(payload, payloadSize, "%s", _payload);
 		break;
 	case 4:
-		if (snprintf(_payload, sizeof(_payload), "%ld %s", (long int)message.getLong(), (char *)mysSetReqUnits[message.type]) < 0) // Means append did not (entirely) fit
+		if (snprintf(_payload, sizeof(_payload), "%ld %s", (long int)message.getLong(), unit) < 0) // Means append did not (entirely) fit
 		{
 			_payload[0] = '\0';
 		}
-		strcpy(payload, _payload);
+		snprintf(payload, payloadSize, "%s", _payload);
 		break;
 	case 5:
-		if (snprintf(_payload, sizeof(_payload), "%lu %s", (long unsigned int)message.getULong(), (char *)mysSetReqUnits[message.type]) < 0) // Means append did not (entirely) fit
+		if (snprintf(_payload, sizeof(_payload), "%lu %s", (long unsigned int)message.getULong(), unit) < 0) // Means append did not (entirely) fit
 		{
 			_payload[0] = '\0';
 		}
-		strcpy(payload, _payload);
+		snprintf(payload, payloadSize, "%s", _payload);
 		break;
 	case 6:
 		// if (snprintf(_payload, sizeof(_payload), "%p %s", (void *)message.getCustom(), (char *)mysSetReqUnits[message.type]) < 0) // Means append did not (entirely) fit
@@ -617,71 +619,95 @@ void getMessagePayload(char *payload, MyMessage message)
 			{
 				_payload[0] = '\0';
 			}
-			strcpy(payload, _payload);
+			snprintf(payload, payloadSize, "%s", _payload);
 		}
 		break;
 	case 7:
-		if (snprintf(_payload, sizeof(_payload), "%0.2f %s", message.getFloat(), (char *)mysSetReqUnits[message.type]) < 0) // Means append did not (entirely) fit
+		if (snprintf(_payload, sizeof(_payload), "%0.2f %s", message.getFloat(), unit) < 0) // Means append did not (entirely) fit
 		{
 			_payload[0] = '\0';
 		}
-		strcpy(payload, _payload);
+		snprintf(payload, payloadSize, "%s", _payload);
 		break;
 	default:
 		if (snprintf(_payload, sizeof(_payload), "error: payload.type: %d - message.type: %d", message.getPayloadType(), message.type) < 0) // Means append did not (entirely) fit
 		{
 			_payload[0] = '\0';
 		}
-		strcpy(payload, _payload);
+		snprintf(payload, payloadSize, "%s", _payload);
 		break;
 	}
 	_payload[0] = {'\0'};
 	dbgprintf(ico_info, "getMessagePayload %s\n", payload);
 }
 
-/*
- *
- */
+#include "gw_clients.h"
+
 void updateWebStats()
 {
-	char timestamp[21] = {'\0'};
+	char timestamp[21];
+	getCurrentTimeString(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S");
 
-	String resetReason = "";
-	if (resetInfo.reason < 7) {
-		resetReason = reset_reasons_esp8266[resetInfo.reason];
-	} else {
-		resetReason = "Unbekannter Reset-Grund: " + String(resetInfo.reason);
-	}
+	char resetReason[48];
+	if (resetInfo.reason < 7)
+		strncpy(resetReason, reset_reasons_esp8266[resetInfo.reason], sizeof(resetReason) - 1);
+	else
+		snprintf(resetReason, sizeof(resetReason), "Unbekannter Reset-Grund: %u", resetInfo.reason);
+	resetReason[sizeof(resetReason) - 1] = '\0';
 
-	getCurrentTimeString(timestamp, "%Y-%m-%d %H:%M:%S");
+	char heapBuf[12], flashBuf[12], sketchBuf[12], freeSketchBuf[12];
+	formatBytes(ESP.getFreeHeap(),         heapBuf,       sizeof(heapBuf));
+	formatBytes(ESP.getFlashChipRealSize(), flashBuf,     sizeof(flashBuf));
+	formatBytes(ESP.getSketchSize(),        sketchBuf,    sizeof(sketchBuf));
+	formatBytes(ESP.getFreeSketchSpace(),   freeSketchBuf, sizeof(freeSketchBuf));
+
 	// https://arduino-esp8266.readthedocs.io/en/latest/libraries.html#esp-specific-apis
-	String page = "<table><thead><tr><th>&nbsp;</th><th>&nbsp;</th></thead><tr><td>gateway started at</td><td>" +
-				  getBootTime() +
-				  "</td></tr><tr><td>hostname</td><td>" + String(WiFi.hostname()) + "</td></tr>" +
-				  "<tr><td>current time</td><td>" + String(timestamp) + "</td></tr>" +
-				  "<tr><td>runtime</td><td>" + runtime() + "</td></tr>" +
-				  //   "<tr><td>uptime</td><td>" + uptime() + "</td></tr>" +
-				  "<tr><td>build</td><td>" + (String)__DATE__ + " " + (String)__TIME__ + "</td></tr>" +
-				  "<tr><td>sw version</td><td>" + String(__SWVERSION__) + "</td></tr>" +
-				  "<tr><td>free heap</td><td>" + formatBytes(ESP.getFreeHeap()) + "</td></tr>" +
-				  "<tr><td>flash space</td><td>" + formatBytes(ESP.getFlashChipRealSize()) + "</td></tr>" +
-				  "<tr><td>used sketch space</td><td>" + formatBytes(ESP.getSketchSize()) + "</td></tr>" +
-				  "<tr><td>free sketch space</td><td>" + formatBytes(ESP.getFreeSketchSpace()) + "</td></tr>" +
-				  //   "<tr><td>file system</td><td>" + String(fs_info.usedBytes*100.0/fs_info.totalBytes) + "%</td></tr>" +
-				  "<tr><td>rssi</td><td>" + String(WiFi.RSSI()) + "dB</td></tr>" +
-				  "<tr><td>local ip</td><td>" + WiFi.localIP().toString() + "</td></tr>" +
-				  "<tr><td>ssid</td><td>" + WiFi.SSID() + "</td></tr>" +
-				  "<tr><td>mac address</td><td>" + WiFi.macAddress() + "</td></tr>" +
+	static char page[1024];
+	page[0] = '\0';
+	char *p = page;
+	size_t rem = sizeof(page);
+	int n;
+#define WS_APPEND(...) do { \
+		if (rem > 1) { \
+			n = snprintf(p, rem, __VA_ARGS__); \
+			if (n < 0) { \
+				p[0] = '\0'; \
+				rem = 0; \
+			} else if ((size_t)n >= rem) { \
+				p += rem - 1; \
+				rem = 1; \
+			} else { \
+				p += n; \
+				rem -= n; \
+			} \
+		} \
+	} while(0)
+
+	WS_APPEND("<table><thead><tr><th>&nbsp;</th><th>&nbsp;</th></tr></thead>");
+	WS_APPEND("<tr><td>gateway started at</td><td>%s</td></tr>", getBootTime());
+	WS_APPEND("<tr><td>hostname</td><td>%s</td></tr>",           WiFi.hostname().c_str());
+	WS_APPEND("<tr><td>current time</td><td>%s</td></tr>",       timestamp);
+	WS_APPEND("<tr><td>runtime</td><td>%s</td></tr>",            runtime());
+	WS_APPEND("<tr><td>build</td><td>%s %s</td></tr>",           __DATE__, __TIME__);
+	WS_APPEND("<tr><td>sw version</td><td>%s</td></tr>",         __SWVERSION__);
+	WS_APPEND("<tr><td>free heap</td><td>%s</td></tr>",          heapBuf);
+	WS_APPEND("<tr><td>flash space</td><td>%s</td></tr>",        flashBuf);
+	WS_APPEND("<tr><td>used sketch space</td><td>%s</td></tr>",  sketchBuf);
+	WS_APPEND("<tr><td>free sketch space</td><td>%s</td></tr>",  freeSketchBuf);
+	WS_APPEND("<tr><td>rssi</td><td>%ddB</td></tr>",             WiFi.RSSI());
+	WS_APPEND("<tr><td>local ip</td><td>%s</td></tr>",           WiFi.localIP().toString().c_str());
+	WS_APPEND("<tr><td>ssid</td><td>%s</td></tr>",               WiFi.SSID().c_str());
+	WS_APPEND("<tr><td>mac address</td><td>%s</td></tr>",        WiFi.macAddress().c_str());
 #ifdef MY_CORE_ONLY
-				  "<tr><td>MY_CORE_ONLY</td><td>TRUE</td></tr>" +
+	WS_APPEND("<tr><td>MY_CORE_ONLY</td><td>TRUE</td></tr>");
 #endif
-				  "<tr><td><a href=\"/bootlog.txt\">reset reason</a></td><td>" + resetReason + "</td></tr>" +
-				  "</table>" +
-				  "</div></body></html>";
-	send_Event(page.c_str(), "info");
-	page.clear();
-	page = String();
+	WS_APPEND("<tr><td><a href=\"/bootlog.txt\">reset reason</a></td><td>%s</td></tr>", resetReason);
+	WS_APPEND("</table>");
+#undef WS_APPEND
+
+	send_Event(page, "info");
 }
+
 
 //=====================================================================
 #pragma region MySensors receive
@@ -694,62 +720,87 @@ void receive(const MyMessage &message)
 	char webjson[256] = {'\0'};
 	char timestamp[21] = {'\0'};
 	char payload[2 * MAX_MESSAGE_SIZE -1] = {'\0'}; // 2 * (32u) - 1 = 63 ?
-	char msgtype[26] = {'\0'};
-	char cmdtype[4] = {'\0'};
+	char msgtype[32] = {'\0'};
+	char cmdtype[16] = {'\0'};
 	char ack = '0';
 
-	getCurrentTimeString(timestamp, "%H:%M:%S");
+	getCurrentTimeString(timestamp, sizeof(timestamp), "%H:%M:%S");
 
 	if (message.isEcho())
 	{
 		ack = '1';
 	}
 
+	const uint8_t commandCodesCount = sizeof(mysCommandCodes) / sizeof(mysCommandCodes[0]);
+	const uint8_t commandIndex = (message.getCommand() < commandCodesCount) ? message.getCommand() : (commandCodesCount - 1);
+	const uint8_t presentationCodesCount = sizeof(mysPresenationCodes) / sizeof(mysPresenationCodes[0]);
+	const uint8_t internalCodesCount = sizeof(mysInternalCodes) / sizeof(mysInternalCodes[0]);
+	const uint8_t setReqCodesCount = sizeof(mysSetReqCodes) / sizeof(mysSetReqCodes[0]);
+	const uint8_t streamCodesCount = sizeof(mysStreamCodes) / sizeof(mysStreamCodes[0]);
+	snprintf(cmdtype, sizeof(cmdtype), "%s", mysCommandCodes[commandIndex]);
+
 	switch (message.getCommand())
 	{
 	case C_PRESENTATION:
-		// strcpy(cmdtype, "PRS");
-		strcpy(cmdtype, mysCommandCodes[message.getCommand()]);
-		strcpy(msgtype, mysPresenationCodes[message.type]);
+		if (message.type < presentationCodesCount)
+		{
+			snprintf(msgtype, sizeof(msgtype), "%s", mysPresenationCodes[message.type]);
+		}
+		else
+		{
+			snprintf(msgtype, sizeof(msgtype), "type: %u", message.type);
+		}
 		// if (message.sensor == 255)
 		// {
-		getMessagePayload(payload, message);
+		getMessagePayload(payload, sizeof(payload), message);
 		// }
 		break;
 
 	case C_INTERNAL:
-		// strcpy(cmdtype, "INT");
-		strcpy(cmdtype, mysCommandCodes[message.getCommand()]);
-		strcpy(msgtype, mysInternalCodes[message.type]);
-		getMessagePayload(payload, message);
+		if (message.type < internalCodesCount)
+		{
+			snprintf(msgtype, sizeof(msgtype), "%s", mysInternalCodes[message.type]);
+		}
+		else
+		{
+			snprintf(msgtype, sizeof(msgtype), "type: %u", message.type);
+		}
+		getMessagePayload(payload, sizeof(payload), message);
 		break;
 
 	case C_SET:
-		// strcpy(cmdtype, "SET");
-		strcpy(cmdtype, mysCommandCodes[message.getCommand()]);
-		strcpy(msgtype, mysSetReqCodes[message.type]);
-		getMessagePayload(payload, message);
+		if (message.type < setReqCodesCount)
+		{
+			snprintf(msgtype, sizeof(msgtype), "%s", mysSetReqCodes[message.type]);
+		}
+		else
+		{
+			snprintf(msgtype, sizeof(msgtype), "type: %u", message.type);
+		}
+		getMessagePayload(payload, sizeof(payload), message);
 		break;
 
 	case C_REQ:
-		// strcpy(cmdtype, "REQ");
-		strcpy(cmdtype, mysCommandCodes[message.getCommand()]);
 		// not used normally
 		snprintf(msgtype, sizeof(msgtype), "type: %u", message.type);
-		getMessagePayload(payload, message);
+		getMessagePayload(payload, sizeof(payload), message);
 		break;
 
 	case C_STREAM:
-		// strcpy(cmdtype, "STR");
-		strcpy(cmdtype, mysCommandCodes[message.getCommand()]);
-		strcpy(msgtype, mysStreamCodes[message.type]);
-		getMessagePayload(payload, message);
+		if (message.type < streamCodesCount)
+		{
+			snprintf(msgtype, sizeof(msgtype), "%s", mysStreamCodes[message.type]);
+		}
+		else
+		{
+			snprintf(msgtype, sizeof(msgtype), "type: %u", message.type);
+		}
+		getMessagePayload(payload, sizeof(payload), message);
 		break;
 
 	default:
-		strcpy(cmdtype, mysCommandCodes[message.getCommand()]);
 		snprintf(msgtype, sizeof(msgtype), "type: %u", message.type);
-		getMessagePayload(payload, message);
+		getMessagePayload(payload, sizeof(payload), message);
 		break;
 	}
 
@@ -770,14 +821,14 @@ void receive(const MyMessage &message)
 #endif // TELNET
 
 #ifdef WWW
-	if (snprintf(webjson, sizeof(webjson), "{\n \"time\" : \"%s\", \"cmd\" : \"%s\", \"sender\" : \"%d\", \"sensor\" : \"%d\", \"ack\" : \"%c\", \"msgtype\" : \"%s\", \"payload\" : \"%s\" \n}",
-				 timestamp,		 // timestamp
-				 cmdtype,		 //
-				 message.sender, // node id
-				 message.sensor, // sensor id
-				 ack,			 // char
-				 msgtype,		 //
-				 payload) < 0)	 // Means append did not (entirely) fit
+	if (snprintf(webjson, sizeof(webjson), "{\"time\":\"%s\",\"cmd\":\"%s\",\"sender\":\"%d\",\"sensor\":\"%d\",\"ack\":\"%c\",\"msgtype\":\"%s\",\"payload\":\"%s\"}",
+				 timestamp,
+				 cmdtype,
+				 message.sender,
+				 message.sensor,
+				 ack,
+				 msgtype,
+				 payload) < 0)
 	{
 		webjson[0] = '\0';
 	}
@@ -1097,7 +1148,10 @@ void loop_NTP()
  */
 //////////////////////////////////////////////////////////////////////////////////////////////////
 //	#define MY_INDICATION_HANDLER is needed
-//
+//  - Grün: &#128994; (🟢)
+//  - Rot: &#128308; (🔴)
+//  - Gelb: &#128993; (🟡)
+
 void indication(const indication_t indicator)
 {
 	lastIndicatorCode = static_cast<int>(indicator);
@@ -1108,31 +1162,34 @@ void indication(const indication_t indicator)
 	case INDICATION_GW_TX:
 		gatewayTxMessage++;
 		rxtxStats.nGwTx++;
-		// send_Event("<img src=\"green.svg\" />", "led");
+		send_Event("&#128994;", "led"); // 🟢
 		break;
 
 	case INDICATION_GW_RX:
 		gatewayRxMessage++;
 		rxtxStats.nGwRx++; 
-		// send_Event("<img src=\"red.svg\" />", "led");
+		send_Event("&#128308;", "led"); // 🔴
 		break;
 
 	case INDICATION_TX:
 		sensorTxMessage++;
 		rxtxStats.nTx++; 
-		// send_Event("<img src=\"green.svg\" />", "led");
+		send_Event("&#128994;", "led"); // 🟢
 		break;
 
 	case INDICATION_RX:
 		sensorRxMessage++;
 		rxtxStats.nRx++; 
-		// send_Event("<img src=\"red.svg\" />", "led");
+		send_Event("&#128308;", "led"); // 🔴
 		break;
 
-	case INDICATION_ERR_TX:	rxtxStats.nErr++; break;
+	case INDICATION_ERR_TX:
+		rxtxStats.nErr++;
+		send_Event("&#128308;", "led"); // 🔴
+		break;
 
 	default:
-		// send_Event("<img src=\"yellow.svg\" />", "led");
+		send_Event("&#128993;", "led"); // 🟡
 		break;
 	};
 
@@ -1151,11 +1208,10 @@ void indication(const indication_t indicator)
 		mysIndication = "Unknown indication";
 	}
 
-	char msgbuf[128] = {'\0'};
+	char msgbuf[192] = {'\0'};
 	if (snprintf(msgbuf, sizeof(msgbuf),
-				 "%s | gateway: rx: %lu - tx: %lu  | sensors: rx: %lu - tx: %lu  | errors: %lu <br />",
+				 "%s | gateway: rx: %lu - tx: %lu  | sensors: rx: %lu - tx: %lu  | err: %lu <br />",
 				 mysIndication,
-				 // indicator,
 				 gatewayRxMessage,
 				 gatewayTxMessage,
 				 sensorRxMessage,
@@ -1328,7 +1384,7 @@ void loop()
 		yield();
 
 		char timestamp[22];
-		getCurrentTimeString(timestamp, "%Y-%m-%d %H:%M:%S");
+		getCurrentTimeString(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S");
 		uint32 heap = system_get_free_heap_size();
 		if ((alertSent == false) && (heap < 10.0))
 		{
@@ -1340,13 +1396,15 @@ void loop()
 			alertSent = false;
 		}
 
+		char heapFmt[12];
+		formatBytes(heap, heapFmt, sizeof(heapFmt));
 		char buf[128];
 		if (snprintf(buf, sizeof(buf),
 					 "%s | %s | cycle: %lu &mu;s | heap: %s | fragm: %u%% | blocks: %u<br />",
 					 timestamp,
 					 runtime(),
 					 getCpuDelta(),
-					 formatBytes(heap).c_str(),
+					 heapFmt,
 					 ESP.getHeapFragmentation(),
 					 ESP.getMaxFreeBlockSize()) < 0)
 		{
@@ -1356,19 +1414,20 @@ void loop()
 		timestamp[0] = {'\0'};
 		buf[0] = {'\0'};
 
-		String telem = buildTelemetryJson(
+		char telem[256];
+		buildTelemetryJson(telem, sizeof(telem),
 			heap,
 			ESP.getHeapFragmentation(),
 			ESP.getMaxFreeBlockSize(),
 			WiFi.RSSI(),
-			String(wifiStatusToString(WiFi.status())),
+			wifiStatusToString(WiFi.status()),
 			lastIndicatorCode,
 			gatewayRxMessage,
 			gatewayTxMessage,
 			sensorRxMessage,
 			sensorTxMessage,
 			indicatorTxErrors);
-		send_Event(telem.c_str(), "telemetry");
+		send_Event(telem, "telemetry");
 
 		static unsigned long lastControllerDiagMs = 0;
 		if (millis() - lastControllerDiagMs > 30000UL)
@@ -1388,7 +1447,20 @@ void loop()
 					  (lastIndicatorMs == 0 ? 0UL : millis() - lastIndicatorMs));
 		}
 
-		updateWebStats();
+		static unsigned long lastInfoSendMs = 0;
+		if (millis() - lastInfoSendMs >= 5000UL) {
+			lastInfoSendMs = millis();
+			updateWebStats();
+		}
+
+		static unsigned long lastGwClientsSendMs = 0;
+		if (millis() - lastGwClientsSendMs >= 5000UL) {
+			lastGwClientsSendMs = millis();
+			static char clientsBuf[640];
+			clientsBuf[0] = '\0';
+			buildGwClientsHtml(clientsBuf, sizeof(clientsBuf));
+			send_Event(clientsBuf, "clients");
+		}
 	}
 
 	// interval based jobs
