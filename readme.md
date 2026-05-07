@@ -99,6 +99,102 @@ ls /dev/cu.*
 | `d1_mini_serial` | Wemos D1 Mini, serieller Upload |
 | `d1_mini_pro_serial` | Wemos D1 Mini Pro, serieller Upload |
 
+## Monitoring / Crash-Erkennung
+
+### `/healthz` Endpoint
+
+Der Gateway stellt einen schlanken JSON-Endpoint bereit:
+
+```text
+GET /healthz
+```
+
+Beispiel-Felder: `boot_count`, `last_boot_epoch`, `reset_reason_code`, `uptime_s`, `heap`, `rssi`, `wifi_connected`, `sse_clients`.
+
+### Dateizugriff auf LittleFS
+
+- `GET /fs` → listet Dateien als JSON
+- `GET /fs?path=/bootlog.txt` → liefert die angeforderte Datei
+
+Pfadvalidierung ist aktiv (`/`-Pflicht, kein `..`).
+
+### Externer Heartbeat (optional)
+
+In `src/config.h` kann ein Outbound-Heartbeat aktiviert werden:
+
+```cpp
+// #define EXTERNAL_HEARTBEAT_URL "http://192.168.2.222:8080/mysensors/heartbeat"
+#define EXTERNAL_HEARTBEAT_INTERVAL_MS 60000UL
+```
+
+Wenn `EXTERNAL_HEARTBEAT_URL` gesetzt ist, sendet der Gateway regelmäßig einen kleinen HTTP-POST mit Boot-/Heap-/WiFi-Metadaten.
+
+#### Minimaler Python-Receiver (Flask)
+
+Datei: `tools/heartbeat_server.py`
+
+Start auf dem Smarthome-Server:
+
+```bash
+python3 -m pip install flask
+HB_BIND_HOST=192.168.2.222 HB_BIND_PORT=18080 python3 tools/heartbeat_server.py
+```
+
+Verfügbare Endpoints:
+
+- `POST /mysensors/heartbeat` (vom ESP)
+- `GET /mysensors/heartbeat/latest?host=GatewayWemosD1Mini`
+- `GET /mysensors/heartbeat/history?limit=50`
+- `GET /healthz`
+
+#### Als systemd-Service
+
+Service-Template: `tools/mysensors-heartbeat.service`  
+Env-Template: `tools/mysensors-heartbeat.env.example`
+
+```bash
+sudo cp tools/mysensors-heartbeat.service /etc/systemd/system/
+sudo cp tools/mysensors-heartbeat.env.example /etc/default/mysensors-heartbeat
+```
+
+Dann in `/etc/systemd/system/mysensors-heartbeat.service` den Projektpfad (`/opt/GatewayWemosD1Mini`) anpassen.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now mysensors-heartbeat
+sudo systemctl status mysensors-heartbeat
+```
+
+### Monit: Reboot-Erkennung (nicht nur Down)
+
+Zusätzlich zum HTTP-Alive-Check kann Monit den `boot_count` überwachen:
+
+```monit
+CHECK PROGRAM mysensorsgw_bootcount WITH PATH "/usr/local/bin/check-mysensorsgw-bootcount.sh"
+  IF STATUS != 0 FOR 2 CYCLES THEN EXEC "/etc/monit/alert-ntfy.sh 'mysensorsGW reboot' 'boot_count geändert'"
+```
+
+Beispiel `check-mysensorsgw-bootcount.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+STATE="/var/lib/monit/mysensorsgw.bootcount"
+URL="http://192.168.2.211/healthz"
+
+boot_count="$(curl -fsS "$URL" | sed -n 's/.*"boot_count":\([0-9]\+\).*/\1/p')"
+[[ -n "$boot_count" ]]
+
+if [[ -f "$STATE" ]]; then
+  old="$(cat "$STATE")"
+  echo "$boot_count" > "$STATE"
+  [[ "$boot_count" == "$old" ]] && exit 0 || exit 1
+fi
+
+echo "$boot_count" > "$STATE"
+exit 0
+```
+
 ## Hardware
 
 ### LED-Belegung

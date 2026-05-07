@@ -27,7 +27,7 @@ void getCurrentTimeString(char *timestamp, size_t timestampSize, const char *for
 void dbgprintf(dbgIcons icon, const char *format, ...)
 {
 #ifdef MY_DEBUG
-	static char sbuf[1024] = {'\0'}; // For debug lines
+	static char sbuf[384] = {'\0'}; // For debug lines
 	va_list varArgs;								// For variable number of params
 	va_start(varArgs, format);						// Prepare parameters
 	vsnprintf(sbuf, sizeof(sbuf), format, varArgs); // Format the message
@@ -71,7 +71,7 @@ void dbgprintf(dbgIcons icon, const char *format, ...)
 void dbgprint(dbgIcons icon, const char *textbuf)
 {
 #ifdef MY_DEBUG
-	static char sbuf[1024] = {'\0'}; // For debug lines
+	static char sbuf[384] = {'\0'}; // For debug lines
 	snprintf(sbuf, sizeof(sbuf), "%s", textbuf ? textbuf : "");
 	static char uniicon[5];
 	switch (icon)

@@ -24,7 +24,17 @@
 AsyncWebServer server(80);
 AsyncEventSource events("/events");
 static const char *NODE_NAMES_FILE = "/node_names.txt";
-static String nodeNames[256];
+static const uint8_t NODE_NAME_SLOTS = 32;
+struct NodeNameEntry {
+	uint8_t id;
+	String name;
+	bool used;
+};
+static NodeNameEntry nodeNames[NODE_NAME_SLOTS];
+static uint32_t gBootCount = 0;
+static uint32_t gLastBootEpoch = 0;
+static uint8_t gResetReasonCode = 0;
+static bool gNtpSynced = false;
 
 // because SPIFFS is deprecated
 #include <LittleFS.h>
@@ -41,10 +51,58 @@ static String trimCopy(const String &in)
 	return s;
 }
 
+static bool isSafeFsPath(const String &path)
+{
+	if (!path.length() || path.length() > 63) {
+		return false;
+	}
+	if (path[0] != '/') {
+		return false;
+	}
+	if (path.indexOf("..") >= 0 || path.indexOf('\\') >= 0) {
+		return false;
+	}
+	return true;
+}
+
+static const char *guessContentType(const String &path)
+{
+	if (path.endsWith(".txt") || path.endsWith(".log")) return "text/plain";
+	if (path.endsWith(".json")) return "application/json";
+	if (path.endsWith(".html")) return "text/html";
+	if (path.endsWith(".css")) return "text/css";
+	if (path.endsWith(".js")) return "application/javascript";
+	if (path.endsWith(".svg")) return "image/svg+xml";
+	if (path.endsWith(".ico")) return "image/x-icon";
+	return "application/octet-stream";
+}
+
+static int findNodeNameIndexById(int id)
+{
+	for (uint8_t i = 0; i < NODE_NAME_SLOTS; i++) {
+		if (nodeNames[i].used && nodeNames[i].id == static_cast<uint8_t>(id)) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static int findFreeNodeNameSlot()
+{
+	for (uint8_t i = 0; i < NODE_NAME_SLOTS; i++) {
+		if (!nodeNames[i].used) {
+			return i;
+		}
+	}
+	return -1;
+}
+
 static void loadNodeNames()
 {
-	for (uint16_t i = 0; i < 256; i++) {
-		nodeNames[i] = "";
+	for (uint16_t i = 0; i < NODE_NAME_SLOTS; i++) {
+		nodeNames[i].id = 0;
+		nodeNames[i].name = "";
+		nodeNames[i].used = false;
 	}
 	if (!LittleFS.begin()) {
 		dbgprintln(ico_error, "could not open LittleFS for node name loading");
@@ -75,7 +133,15 @@ static void loadNodeNames()
 			if (namePart.length() > 31) {
 				namePart = namePart.substring(0, 31);
 			}
-			nodeNames[id] = namePart;
+			int slot = findNodeNameIndexById(id);
+			if (slot < 0) {
+				slot = findFreeNodeNameSlot();
+			}
+			if (slot >= 0) {
+				nodeNames[slot].id = static_cast<uint8_t>(id);
+				nodeNames[slot].name = namePart;
+				nodeNames[slot].used = true;
+			}
 		}
 	}
 	file.close();
@@ -92,9 +158,9 @@ static bool saveNodeNames()
 		dbgprintln(ico_error, "could not write node_names.txt");
 		return false;
 	}
-	for (uint16_t i = 0; i < 256; i++) {
-		if (nodeNames[i].length()) {
-			file.printf("%u=%s\n", i, nodeNames[i].c_str());
+	for (uint16_t i = 0; i < NODE_NAME_SLOTS; i++) {
+		if (nodeNames[i].used && nodeNames[i].name.length()) {
+			file.printf("%u=%s\n", nodeNames[i].id, nodeNames[i].name.c_str());
 		}
 	}
 	file.close();
@@ -105,8 +171,8 @@ static String nodeNamesAsJson()
 {
 	String out = "{";
 	bool first = true;
-	for (uint16_t i = 0; i < 256; i++) {
-		if (!nodeNames[i].length()) {
+	for (uint16_t i = 0; i < NODE_NAME_SLOTS; i++) {
+		if (!nodeNames[i].used || !nodeNames[i].name.length()) {
 			continue;
 		}
 		if (!first) {
@@ -114,9 +180,9 @@ static String nodeNamesAsJson()
 		}
 		first = false;
 		out += "\"";
-		out += i;
+		out += nodeNames[i].id;
 		out += "\":\"";
-		String name = nodeNames[i];
+		String name = nodeNames[i].name;
 		name.replace("\\", "\\\\");
 		name.replace("\"", "\\\"");
 		out += name;
@@ -149,10 +215,22 @@ void send_Event(const char *content, const char *section)
 	events.send(content, section);
 }
 
+void updateHealthSnapshot(uint32_t bootCount,
+						  uint32_t lastBootEpoch,
+						  uint8_t resetReasonCode,
+						  bool ntpSynced)
+{
+	gBootCount = bootCount;
+	gLastBootEpoch = lastBootEpoch;
+	gResetReasonCode = resetReasonCode;
+	gNtpSynced = ntpSynced;
+}
+
 String getNodeNameById(uint8_t nodeId)
 {
-	if (nodeId <= 255 && nodeNames[nodeId].length()) {
-		return nodeNames[nodeId];
+	int idx = findNodeNameIndexById(nodeId);
+	if (idx >= 0) {
+		return nodeNames[idx].name;
 	}
 	return String("");
 }
@@ -347,14 +425,33 @@ void setup_WebServer()
 		String name = trimCopy(request->getParam("name", true)->value());
 
 		if (id < 0 || id > 255) {
-			request->send(400, "application/json", "{\"ok\":false,\"error\":\"id out of range\"}");
+			request->send(400, "application/json", "{\"ok\":false,\"error\":\"id out of range (0-255)\"}");
 			return;
 		}
 		if (name.length() > 31) {
 			name = name.substring(0, 31);
 		}
 
-		nodeNames[id] = name; // empty string removes alias
+		const int existing = findNodeNameIndexById(id);
+		if (!name.length()) {
+			if (existing >= 0) {
+				nodeNames[existing].used = false;
+				nodeNames[existing].name = "";
+				nodeNames[existing].id = 0;
+			}
+		} else if (existing >= 0) {
+			nodeNames[existing].name = name;
+		} else {
+			const int freeSlot = findFreeNodeNameSlot();
+			if (freeSlot < 0) {
+				request->send(400, "application/json", "{\"ok\":false,\"error\":\"node name slots full (max 32)\"}");
+				return;
+			}
+			nodeNames[freeSlot].id = static_cast<uint8_t>(id);
+			nodeNames[freeSlot].name = name;
+			nodeNames[freeSlot].used = true;
+		}
+
 		bool ok = saveNodeNames();
 		request->send(ok ? 200 : 500, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"save failed\"}");
 	});
@@ -380,6 +477,44 @@ void setup_WebServer()
 		// LittleFS.end();
 		dbgprintln(ico_info, "reading from bootlog.txt - done.");
 		request->send(resp);
+	});
+
+	server.on("/fs", HTTP_GET, [](AsyncWebServerRequest *request){
+		if (!LittleFS.begin()) {
+			request->send(500, "application/json", "{\"ok\":false,\"error\":\"LittleFS unavailable\"}");
+			return;
+		}
+
+		if (!request->hasParam("path")) {
+			AsyncResponseStream *resp = request->beginResponseStream("application/json");
+			resp->print("{\"ok\":true,\"files\":[");
+			bool first = true;
+			Dir dir = LittleFS.openDir("/");
+			while (dir.next()) {
+				if (!first) {
+					resp->print(",");
+				}
+				first = false;
+				resp->printf("{\"path\":\"%s\",\"size\":%lu}",
+							 dir.fileName().c_str(),
+							 static_cast<unsigned long>(dir.fileSize()));
+			}
+			resp->print("]}");
+			request->send(resp);
+			return;
+		}
+
+		String path = trimCopy(request->getParam("path")->value());
+		if (!isSafeFsPath(path)) {
+			request->send(400, "application/json", "{\"ok\":false,\"error\":\"invalid path\"}");
+			return;
+		}
+		if (!LittleFS.exists(path)) {
+			request->send(404, "application/json", "{\"ok\":false,\"error\":\"file not found\"}");
+			return;
+		}
+
+		request->send(LittleFS, path, guessContentType(path), false);
 	});
 
 	server.on("/wipe", [](AsyncWebServerRequest *request){
@@ -411,10 +546,48 @@ void setup_WebServer()
 		send_Status(request);
 	});
 
+	server.on("/healthz", HTTP_GET, [](AsyncWebServerRequest *request) {
+		const unsigned long uptimeSec = millis() / 1000UL;
+		const bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+		const time_t nowTs = time(nullptr);
+		const unsigned long nowEpoch = (nowTs > 0) ? static_cast<unsigned long>(nowTs) : 0UL;
+		const char *resetTxt = (gResetReasonCode < 7) ? RST_REASONS[gResetReasonCode] : "UNKNOWN";
+
+		char json[320] = {'\0'};
+		snprintf(json, sizeof(json),
+				 "{\"ok\":true,\"host\":\"%s\",\"boot_count\":%lu,\"last_boot_epoch\":%lu,\"ntp_synced\":%s,"
+				 "\"reset_reason_code\":%u,\"reset_reason\":\"%s\",\"uptime_s\":%lu,"
+				 "\"wifi_connected\":%s,\"wifi_status\":%d,\"heap\":%lu,\"heap_frag\":%u,"
+				 "\"max_free_block\":%lu,\"rssi\":%d,\"sse_clients\":%u,\"now_epoch\":%lu}",
+				 WiFi.hostname().c_str(),
+				 static_cast<unsigned long>(gBootCount),
+				 static_cast<unsigned long>(gLastBootEpoch),
+				 gNtpSynced ? "true" : "false",
+				 static_cast<unsigned>(gResetReasonCode),
+				 resetTxt,
+				 uptimeSec,
+				 wifiConnected ? "true" : "false",
+				 static_cast<int>(WiFi.status()),
+				 static_cast<unsigned long>(ESP.getFreeHeap()),
+				 static_cast<unsigned>(ESP.getHeapFragmentation()),
+				 static_cast<unsigned long>(ESP.getMaxFreeBlockSize()),
+				 WiFi.RSSI(),
+				 static_cast<unsigned>(events.count()),
+				 nowEpoch);
+
+		request->send(200, "application/json", json);
+	});
+
 	server.on("/reconnect", HTTP_GET, [](AsyncWebServerRequest *request){
 		// server.send(304, "message/http");
 		WiFi.reconnect();
 		delay(2000);
+		request->send_P(200, "text/html", index_html, processor);
+	});
+
+	server.on("/sync-time", HTTP_GET, [](AsyncWebServerRequest *request){
+		triggerNtpSync();
+		dbgprintln(ico_info, "[NTP] manual time sync requested");
 		request->send_P(200, "text/html", index_html, processor);
 	});
 

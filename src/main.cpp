@@ -93,7 +93,7 @@ extern "C" {
 
 // Enable MY_IP_ADDRESS here if you want a static ip address (no DHCP)
 // DiC: nicht definieren, sonst läuft FHEM nicht damit
-// #define MY_IP_ADDRESS 192, 168, 2, 221
+#define MY_IP_ADDRESS 192, 168, 2, 211
 
 // If using static ip you need to define Gateway and Subnet address as well
 // #define MY_IP_GATEWAY_ADDRESS 192,168,2,23    /// IMMER DIE IP ADRESSE DES CONTROLLERS: smarthome !!!!
@@ -143,6 +143,13 @@ unsigned long gatewayRxMessage = 0;
 unsigned long sensorTxMessage = 0;
 unsigned long sensorRxMessage = 0;
 unsigned long indicatorTxErrors = 0;
+uint32_t bootCount = 0;
+uint32_t lastBootEpoch = 0;
+bool bootTimeSynced = false;
+
+static const char *BOOT_COUNT_FILE = "/boot_count.txt";
+static const char *LAST_BOOT_EPOCH_FILE = "/last_boot_epoch.txt";
+static bool bootLogSyncedWritten = false;
 
 
 // because SPIFFS is deprecated
@@ -164,8 +171,10 @@ unsigned long indicatorTxErrors = 0;
 
 #ifdef PUSHOVER
 #include <WiFiClientSecure.h>
-#include <ESP8266HTTPClient.h>
 #endif // PUSHOVER
+#if defined(PUSHOVER) || defined(EXTERNAL_HEARTBEAT_URL)
+#include <ESP8266HTTPClient.h>
+#endif
 boolean alertSent = false;
 
 ////////////////////////////////////////////////////////////////////////
@@ -300,12 +309,6 @@ struct RxTxStats_t {
 	unsigned nRx, nTx, nGwRx, nGwTx, nErr;
 } rxtxStats;
 
-/// nMessagesRx[i] counts messages received from node id `i`
-unsigned nMessagesRx[256];
-/// nMessagesTx[i] counts messages sent to node id `i`
-unsigned nMessagesTx[256];
-/// nRetries[i] counts mretries required for messages sent to node id `i`
-unsigned nRetries[256];
 
 struct ArcStats_t {
     unsigned packets;   ///< number of packets sent
@@ -385,9 +388,6 @@ time_t getTimeNow()
  */
 void initStats()
 {
-	memset( nMessagesRx, 0, sizeof(nMessagesRx));
-	memset( nMessagesTx, 0, sizeof(nMessagesTx));
-	memset( nRetries, 0, sizeof(nRetries));
 	memset( &rxtxStats, 0, sizeof(rxtxStats) );
     memset( &arcStats, 0, sizeof arcStats );
     t_last_clear = getTimeNow();
@@ -429,9 +429,10 @@ const char* reportArcStatistics()
  */
 void aftertransportSend(const uint8_t nextRecipient, const MyMessage &message) 
 {
+	(void)nextRecipient;
+	(void)message;
     int arc = collectArcStatistics();
-    nMessagesTx[ nextRecipient ]++;
-    nRetries[ nextRecipient ] += arc;
+	(void)arc;
 }
 //---------------------------------------------------------------------
 #pragma endregion
@@ -440,10 +441,59 @@ void aftertransportSend(const uint8_t nextRecipient, const MyMessage &message)
 //=====================================================================
 #pragma region logBootTime
 
+static bool isTimeSane()
+{
+	time_t now = time(nullptr);
+	return now > 1700000000; // ~2023-11-14
+}
+
+static uint32_t readUint32File(const char *path)
+{
+	if (!path || !LittleFS.begin() || !LittleFS.exists(path)) {
+		return 0;
+	}
+	File file = LittleFS.open(path, "r");
+	if (!file || file.isDirectory()) {
+		return 0;
+	}
+	char buf[16] = {'\0'};
+	const size_t n = file.readBytesUntil('\n', buf, sizeof(buf) - 1);
+	file.close();
+	buf[n] = '\0';
+	char *endp = nullptr;
+	const unsigned long v = strtoul(buf, &endp, 10);
+	return (endp == buf) ? 0 : static_cast<uint32_t>(v);
+}
+
+static bool writeUint32File(const char *path, uint32_t value)
+{
+	if (!path || !LittleFS.begin()) {
+		return false;
+	}
+	File file = LittleFS.open(path, "w");
+	if (!file || file.isDirectory()) {
+		return false;
+	}
+	file.printf("%lu\n", static_cast<unsigned long>(value));
+	file.close();
+	return true;
+}
+
+static void initBootCounter()
+{
+	bootCount = readUint32File(BOOT_COUNT_FILE);
+	bootCount++;
+	if (!writeUint32File(BOOT_COUNT_FILE, bootCount)) {
+		dbgprintln(ico_error, "boot counter could not be persisted");
+	}
+
+	lastBootEpoch = readUint32File(LAST_BOOT_EPOCH_FILE);
+}
+
 /*
  *
  */
-void logBootTime()
+void logBootTime(bool ntpOk)
 {
 	dbgprintln(ico_info, "Updating bootlog");
 	boolean fsOk = LittleFS.begin();
@@ -463,8 +513,21 @@ void logBootTime()
 				snprintf(resetReason, sizeof(resetReason), "Unknown Reset reason: %u", resetInfo.reason);
 			resetReason[sizeof(resetReason) - 1] = '\0';
 
-			char buffer[64] = {'\0'};
-			if (snprintf(buffer, sizeof(buffer), "%s - %s", getBootTime(), resetReason) < 0)
+			char timestamp[24] = {'\0'};
+			if (ntpOk) {
+				getCurrentTimeString(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S");
+			} else {
+				snprintf(timestamp, sizeof(timestamp), "unsynced@%lus", millis() / 1000UL);
+			}
+
+			char buffer[176] = {'\0'};
+			if (snprintf(buffer, sizeof(buffer),
+						 "%s | boot=%lu | rst=%s | heap=%lu | ip=%s",
+						 timestamp,
+						 static_cast<unsigned long>(bootCount),
+						 resetReason,
+						 static_cast<unsigned long>(ESP.getFreeHeap()),
+						 WiFi.localIP().toString().c_str()) < 0)
 			{
 				buffer[0] = '\0';
 			}
@@ -514,7 +577,7 @@ void setup_OTA()
 		send_Event(buf, "debug");
 	});
 	ArduinoOTA.onError([](ota_error_t error) {
-		dbgprintf(ico_info, "Error: %s", String(error).c_str());
+		dbgprintf(ico_info, "Error: %d", error);
 		if (error == OTA_AUTH_ERROR)
 		{
 			dbgprintln(ico_info, "Auth Failed");
@@ -565,7 +628,15 @@ void getMessagePayload(char *payload, size_t payloadSize, MyMessage message)
 {
 	char _payload[2 * MAX_MESSAGE_SIZE -1 ] = {'\0'};
 	const uint8_t setReqUnitsCount = sizeof(mysSetReqUnits) / sizeof(mysSetReqUnits[0]);
-	const char *unit = (message.type < setReqUnitsCount) ? mysSetReqUnits[message.type] : "";
+	const uint8_t cmd = message.getCommand();
+	const bool isSetReq = (cmd == C_SET || cmd == C_REQ);
+	const bool isInternalBattery = (cmd == C_INTERNAL && message.type == I_BATTERY_LEVEL);
+	const char *unit = "";
+	if (isSetReq && message.type < setReqUnitsCount) {
+		unit = mysSetReqUnits[message.type];
+	} else if (isInternalBattery) {
+		unit = "%";
+	}
 	// mysensors_payload_t plt = ;
 	// DEBUG_PRINTF("getMessagePayload: %d - %d\n", message.getPayloadType(), message.type);
 	switch (message.getPayloadType())
@@ -855,6 +926,56 @@ WiFiEventHandler wifiGotIpHandler;
 
 static const unsigned long WIFI_BEGIN_INTERVAL_MS = 15000UL;          // retry WiFi.begin every 15s
 static const unsigned long WIFI_RECONNECT_TIMEOUT_MS = 1000UL * 60UL * 3UL; // restart only after 3 minutes
+static const unsigned long NTP_RETRY_INTERVAL_MS = 30000UL;
+static unsigned long lastNtpConfigMs = 0;
+static uint8_t ntpServerSetIndex = 0;
+static const char * const NTP_ALT_SERVERS[] = {
+	"pool.ntp.org",
+	"time.google.com",
+	"time.cloudflare.com",
+	"162.159.200.1",
+	"216.239.35.0",
+	"129.6.15.28"
+};
+
+static void requestNtpSync(bool force = false)
+{
+#ifdef NTP
+	if (WiFi.status() != WL_CONNECTED) {
+		return;
+	}
+	const unsigned long nowMs = millis();
+	if (!force && (nowMs - lastNtpConfigMs) < NTP_RETRY_INTERVAL_MS) {
+		return;
+	}
+	lastNtpConfigMs = nowMs;
+
+	const uint8_t altCount = sizeof(NTP_ALT_SERVERS) / sizeof(NTP_ALT_SERVERS[0]);
+	const char *s1 = NTP_SERVER[0];
+	const char *s2 = NTP_SERVER[1];
+	const char *s3 = NTP_SERVER[2];
+
+	if (ntpServerSetIndex > 0) {
+		const uint8_t i = static_cast<uint8_t>((ntpServerSetIndex - 1) % altCount);
+		const uint8_t j = static_cast<uint8_t>((i + 1) % altCount);
+		const uint8_t k = static_cast<uint8_t>((j + 1) % altCount);
+		s1 = NTP_ALT_SERVERS[i];
+		s2 = NTP_ALT_SERVERS[j];
+		s3 = NTP_ALT_SERVERS[k];
+	}
+
+	configTime(TZ_INFO, s1, s2, s3);
+	dbgprintf(ico_info, "[NTP] sync requested (%s, %s, %s)", s1, s2, s3);
+	ntpServerSetIndex = static_cast<uint8_t>((ntpServerSetIndex + 1) % (altCount + 1));
+#else
+	(void)force;
+#endif
+}
+
+void triggerNtpSync()
+{
+	requestNtpSync(true);
+}
 
 const char *wifiStatusToString(wl_status_t status)
 {
@@ -942,6 +1063,7 @@ void setupWifiEventLogging()
 				  wifiStatusToString(WiFi.status()),
 				  static_cast<int>(WiFi.status()),
 				  WiFi.RSSI());
+		requestNtpSync(true);
 	});
 }
 
@@ -1099,6 +1221,55 @@ void pushover(const char *message, const char *title = "MySensors Gateway")
 //---------------------------------------------------------------------
 #pragma endregion
 
+#ifdef EXTERNAL_HEARTBEAT_URL
+static unsigned long lastExternalHeartbeatMs = 0;
+#ifndef EXTERNAL_HEARTBEAT_INTERVAL_MS
+#define EXTERNAL_HEARTBEAT_INTERVAL_MS 60000UL
+#endif
+
+static void sendExternalHeartbeat()
+{
+	if (WiFi.status() != WL_CONNECTED) {
+		return;
+	}
+
+	const unsigned long nowMs = millis();
+	if ((nowMs - lastExternalHeartbeatMs) < EXTERNAL_HEARTBEAT_INTERVAL_MS) {
+		return;
+	}
+	lastExternalHeartbeatMs = nowMs;
+
+	char body[256] = {'\0'};
+	if (snprintf(body, sizeof(body),
+				 "host=%s&boot=%lu&uptime=%lu&heap=%lu&rssi=%d&wifi=%d&rst=%u&ntp=%u&boot_epoch=%lu",
+				 MY_HOSTNAME,
+				 static_cast<unsigned long>(bootCount),
+				 nowMs / 1000UL,
+				 static_cast<unsigned long>(ESP.getFreeHeap()),
+				 WiFi.RSSI(),
+				 static_cast<int>(WiFi.status()),
+				 static_cast<unsigned>(resetInfo.reason),
+				 bootTimeSynced ? 1U : 0U,
+				 static_cast<unsigned long>(lastBootEpoch)) < 0) {
+		return;
+	}
+
+	WiFiClient client;
+	HTTPClient http;
+	http.setReuse(false);
+	http.setTimeout(2500);
+	if (!http.begin(client, EXTERNAL_HEARTBEAT_URL)) {
+		dbgprintln(ico_error, "heartbeat begin failed");
+		return;
+	}
+	http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+	const int code = http.POST(reinterpret_cast<const uint8_t *>(body), strlen(body));
+	dbgprintf(code < 200 || code > 299 ? ico_warning : ico_info,
+			  "heartbeat -> %s (%d)", EXTERNAL_HEARTBEAT_URL, code);
+	http.end();
+}
+#endif
+
 //=====================================================================
 #pragma region MySensors before
 //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1125,15 +1296,16 @@ void loop_NTP()
 {
 	struct tm tm;
 	static time_t lastsec = 0;
-	time_t now = time(&now);
+	time_t now = time(nullptr);
 	localtime_r(&now, &tm);
 
 	if (tm.tm_sec != lastsec)
 	{
+		lastsec = tm.tm_sec;
 		// einmal am Tag die Zeit vom NTP Server holen o. jede Stunde "% 3600" aller zwei "% 7200"
-		if (!(time(&now) % 86400))
+		if ((now % 86400) == 0)
 		{
-			configTime(TZ_INFO, NTP_SERVER[0], NTP_SERVER[1], NTP_SERVER[2]); // check TZ.h, find your location
+			requestNtpSync(true);
 		}
 	}
 }
@@ -1280,7 +1452,7 @@ void setup()
 #endif // TELNET
 
 #ifdef NTP
-	configTime(TZ_INFO, NTP_SERVER[0], NTP_SERVER[1], NTP_SERVER[2]); // check TZ.h, find your location
+	requestNtpSync(true);
 #endif																  // NTP
 
 	setupWifiEventLogging();
@@ -1300,14 +1472,24 @@ void setup()
 	
 	// boolean fsOK = 
 	LittleFS.begin();// Filesystem mounten
+	initBootCounter();
 
 	// initialize statistics
     initStats();
 	
-	// call not before time was set to local time
-	setBootTime();
-	// and write it to LittleFS
-	logBootTime();
+	bootTimeSynced = isTimeSane();
+	if (bootTimeSynced) {
+		lastBootEpoch = static_cast<uint32_t>(time(nullptr));
+		writeUint32File(LAST_BOOT_EPOCH_FILE, lastBootEpoch);
+		setBootTime();
+		logBootTime(true);
+		bootLogSyncedWritten = true;
+	} else {
+		logBootTime(false);
+	}
+#ifdef WWW
+	updateHealthSnapshot(bootCount, lastBootEpoch, static_cast<uint8_t>(resetInfo->reason), bootTimeSynced);
+#endif
 }
 //---------------------------------------------------------------------
 #pragma endregion
@@ -1371,17 +1553,41 @@ void loop()
 
 #ifdef NTP
 	loop_NTP();
+	if (!bootTimeSynced) {
+		requestNtpSync();
+	}
 #endif // NTP
 
 #ifdef OTA
 	ArduinoOTA.handle(); // neu seit 2.2
 #endif					 // OTA
 
+	if (!bootTimeSynced && isTimeSane())
+	{
+		bootTimeSynced = true;
+		lastBootEpoch = static_cast<uint32_t>(time(nullptr));
+		writeUint32File(LAST_BOOT_EPOCH_FILE, lastBootEpoch);
+		setBootTime();
+		if (!bootLogSyncedWritten)
+		{
+			logBootTime(true);
+			bootLogSyncedWritten = true;
+		}
+		dbgprintf(ico_ok, "time synchronized, boot epoch: %lu", static_cast<unsigned long>(lastBootEpoch));
+	}
+
+#ifdef EXTERNAL_HEARTBEAT_URL
+	sendExternalHeartbeat();
+#endif
+
 	// interval based jobs
 	if (millis() - prev_time > interval)
 	{
 		prev_time = millis();
 		yield();
+#ifdef WWW
+		updateHealthSnapshot(bootCount, lastBootEpoch, static_cast<uint8_t>(resetInfo.reason), bootTimeSynced);
+#endif
 
 		char timestamp[22];
 		getCurrentTimeString(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S");

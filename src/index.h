@@ -260,8 +260,8 @@ const char index_html[] PROGMEM = R"=====(
   <div class="nav-tabs">
     <button class="tab" data-tab="messages" onclick="setTab('messages')">&#128233; <span class="lbl">Messages</span></button>
     <button class="tab" data-tab="sensors"  onclick="setTab('sensors')">&#128202; <span class="lbl">Sensors</span></button>
-    <button class="tab" data-tab="info"     onclick="setTab('info')">&#8505; <span class="lbl">Info</span></button>
     <button class="tab" data-tab="nodes"    onclick="setTab('nodes')">&#127991; <span class="lbl">Nodes</span></button>
+    <button class="tab" data-tab="info"     onclick="setTab('info')">&#8505; <span class="lbl">Info</span></button>
     <button class="tab" data-tab="debug"    onclick="setTab('debug')">&#128295; <span class="lbl">Debug</span></button>
   </div>
   <span id="connStatus" class="conn-status conn-err">&#9675; –</span>
@@ -309,6 +309,7 @@ const char index_html[] PROGMEM = R"=====(
     <div class="action-row">
       <button class="btn" onclick="doReboot()">&#128260; Reboot</button>
       <a href="/reconnect" class="btn btn-secondary">&#128268; Reconnect</a>
+      <a href="/sync-time" class="btn btn-secondary">&#128340; Zeit sync</a>
       <a href="/bootlog.txt" class="btn btn-secondary" target="_blank">&#128203; Bootlog</a>
       <a href="/wipe" class="btn btn-danger" onclick="return confirm('Bootlog loeschen?')">&#128465; Wipe Log</a>
     </div>

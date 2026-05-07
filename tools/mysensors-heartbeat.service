@@ -1,0 +1,21 @@
+[Unit]
+Description=MySensors Gateway Heartbeat Receiver (Flask)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/GatewayWemosD1Mini
+EnvironmentFile=-/etc/default/mysensors-heartbeat
+ExecStart=/usr/bin/python3 /opt/GatewayWemosD1Mini/heartbeat_server.py
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
