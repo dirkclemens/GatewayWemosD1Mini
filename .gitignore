@@ -2,6 +2,7 @@
 .vscode/
 include/
 lib/
+tools/__pycache__/
 data/
 static
 flash_contents4MB.bin

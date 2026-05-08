@@ -25,9 +25,14 @@
  
  */
 
-extern "C" {
-#include <user_interface.h>
-}
+// ESP32 WROOM
+#define USE_ESP32
+
+#ifndef USE_ESP32		
+	extern "C" {
+	#include <user_interface.h>
+	}
+#endif
 
 #include "config.h"
 #include "common.h"
@@ -37,7 +42,7 @@ extern "C" {
 
 // MQTT Gateway
 // https://github.com/mysensors/MySensors/blob/master/examples/GatewayESP8266MQTTClient/GatewayESP8266MQTTClient.ino
-// #define WITH_MQTT
+#define WITH_MQTT
 
 // else IP-Gateway
 // https://github.com/mysensors/MySensors/blob/master/examples/GatewayESP8266/GatewayESP8266.ino
@@ -60,13 +65,6 @@ extern "C" {
 
 #ifdef WITH_MQTT
 	#define MY_GATEWAY_MQTT_CLIENT
-#else
-	#define MY_GATEWAY_ESP8266
-#endif
-
-
-#ifdef WITH_MQTT
-	#define MY_GATEWAY_MQTT_CLIENT
 	// Set this node's subscribe and publish topic prefix
 	#define MY_MQTT_PUBLISH_TOPIC_PREFIX "mygateway1-out"
 	#define MY_MQTT_SUBSCRIBE_TOPIC_PREFIX "mygateway1-in"
@@ -81,6 +79,8 @@ extern "C" {
 	// The MQTT broker port to to open
 	#define MY_PORT 1883
 #endif
+
+#define MY_GATEWAY_ESP8266
 
 // Enable UDP communication
 // #define MY_USE_UDP
@@ -134,6 +134,26 @@ extern "C" {
 #define MY_DEFAULT_RX_LED_PIN D0
 #define MY_DEFAULT_TX_LED_PIN D3
 #define MY_WITH_LEDS_BLINKING_INVERSE	// bei externen LEDs
+
+#ifdef USE_ESP32
+	// https://www.mysensors.org/build/connect_radio
+	// ESP32 has 3 SPI interfaces, but only one is usable for RF24, 
+	// so we have to use the default HSPI pins (GPIO 14-12-13) or 
+	// remap them to other pins using SPI.begin(SCK, MISO, MOSI, SS);
+	#define MY_RF24_CE_PIN 17   // CE Pin
+	#define MY_RF24_CS_PIN 5   // CSN Pin oder 13
+
+	// The IRQ pin is only required to be connected if the MY_RX_MESSAGE_BUFFER_FEATURE 
+	// is defined in the sketch. Using this feature is recommended for high traffic nodes or gateways. 
+	// Enabling it will result in better throughput but will require some additional memory to keep the message in memory before processing.	
+	//#define MY_RX_MESSAGE_BUFFER_FEATURE
+
+	#define MY_DEFAULT_ERR_LED_PIN D1
+	#define MY_DEFAULT_RX_LED_PIN D0
+	#define MY_DEFAULT_TX_LED_PIN D3
+	#define MY_WITH_LEDS_BLINKING_INVERSE	// bei externen LEDs
+#endif 
+
 
 #define MY_INDICATION_HANDLER
 #define MY_SPLASH_SCREEN_DISABLED
