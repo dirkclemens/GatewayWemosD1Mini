@@ -25,20 +25,12 @@
  
  */
 
-// ESP32 WROOM
-#define USE_ESP32
-
-#ifndef USE_ESP32		
-	extern "C" {
-	#include <user_interface.h>
-	}
-#endif
-
 #include "config.h"
 #include "common.h"
 #include "uptime.h"
 #include "mysensors_types.h"
 #include "diagnostics_ui.h"
+#include "platform_compat.h"
 
 // MQTT Gateway
 // https://github.com/mysensors/MySensors/blob/master/examples/GatewayESP8266MQTTClient/GatewayESP8266MQTTClient.ino
@@ -80,20 +72,29 @@
 	#define MY_PORT 1883
 #endif
 
-#define MY_GATEWAY_ESP8266
+#ifdef USE_ESP32
+	#define MY_GATEWAY_ESP32
+	// Set the hostname for the WiFi Client. This is the hostname
+	// it will pass to the DHCP server if not static.
+	#define MY_HOSTNAME "GatewayESP32Wroom"
+#else
+	#define MY_GATEWAY_ESP8266
+	// Set the hostname for the WiFi Client. This is the hostname
+	// it will pass to the DHCP server if not static.
+	#define MY_HOSTNAME "GatewayWemosD1Mini"
+#endif
 
 // Enable UDP communication
 // #define MY_USE_UDP
 
-// Set the hostname for the WiFi Client. This is the hostname
-// it will pass to the DHCP server if not static.
-#define MY_HOSTNAME "GatewayWemosD1Mini"
 
 // #define MY_ESP8266_HOSTNAME "MYSD1MiniGatewayOTA"
 
 // Enable MY_IP_ADDRESS here if you want a static ip address (no DHCP)
 // DiC: nicht definieren, sonst läuft FHEM nicht damit
-#define MY_IP_ADDRESS 192, 168, 2, 211
+#ifndef WITH_MQTT
+	#define MY_IP_ADDRESS 192, 168, 2, 211
+#endif
 
 // If using static ip you need to define Gateway and Subnet address as well
 // #define MY_IP_GATEWAY_ADDRESS 192,168,2,23    /// IMMER DIE IP ADRESSE DES CONTROLLERS: smarthome !!!!
@@ -130,29 +131,29 @@
 // Led pins used if blinking feature is enabled above
 // Wemos D1 Mini Pins !!!
 // D4	 IO, 10k Pull-up, BUILTIN_LED	 GPIO2
-#define MY_DEFAULT_ERR_LED_PIN D1
-#define MY_DEFAULT_RX_LED_PIN D0
-#define MY_DEFAULT_TX_LED_PIN D3
-#define MY_WITH_LEDS_BLINKING_INVERSE	// bei externen LEDs
-
 #ifdef USE_ESP32
 	// https://www.mysensors.org/build/connect_radio
 	// ESP32 has 3 SPI interfaces, but only one is usable for RF24, 
 	// so we have to use the default HSPI pins (GPIO 14-12-13) or 
 	// remap them to other pins using SPI.begin(SCK, MISO, MOSI, SS);
-	#define MY_RF24_CE_PIN 17   // CE Pin
-	#define MY_RF24_CS_PIN 5   // CSN Pin oder 13
+	#define MY_RF24_CE_PIN 			17   // CE Pin
+	#define MY_RF24_CS_PIN 			 5   // CSN Pin oder 13
 
 	// The IRQ pin is only required to be connected if the MY_RX_MESSAGE_BUFFER_FEATURE 
 	// is defined in the sketch. Using this feature is recommended for high traffic nodes or gateways. 
 	// Enabling it will result in better throughput but will require some additional memory to keep the message in memory before processing.	
 	//#define MY_RX_MESSAGE_BUFFER_FEATURE
 
-	#define MY_DEFAULT_ERR_LED_PIN D1
-	#define MY_DEFAULT_RX_LED_PIN D0
-	#define MY_DEFAULT_TX_LED_PIN D3
+	#define MY_DEFAULT_ERR_LED_PIN 	32	// red
+	#define MY_DEFAULT_RX_LED_PIN 	33	// green
+	#define MY_DEFAULT_TX_LED_PIN 	27	// yellow
+	#define WITH_LEDS_BLINKING
+#else
+	#define MY_DEFAULT_ERR_LED_PIN 	D1
+	#define MY_DEFAULT_RX_LED_PIN 	D0
+	#define MY_DEFAULT_TX_LED_PIN 	D3
 	#define MY_WITH_LEDS_BLINKING_INVERSE	// bei externen LEDs
-#endif 
+#endif
 
 
 #define MY_INDICATION_HANDLER
@@ -166,16 +167,12 @@ unsigned long indicatorTxErrors = 0;
 uint32_t bootCount = 0;
 uint32_t lastBootEpoch = 0;
 bool bootTimeSynced = false;
+static uint8_t gResetReasonCode = 0;
 
 static const char *BOOT_COUNT_FILE = "/boot_count.txt";
 static const char *LAST_BOOT_EPOCH_FILE = "/last_boot_epoch.txt";
 static bool bootLogSyncedWritten = false;
 
-
-// because SPIFFS is deprecated
-#include <LittleFS.h>
-//#define SPIFFS LittleFS
-// #include "FS.h" 
 
 // #ifdef MY_USE_UDP
 // #include <WiFiUdp.h>
@@ -192,9 +189,6 @@ static bool bootLogSyncedWritten = false;
 #ifdef PUSHOVER
 #include <WiFiClientSecure.h>
 #endif // PUSHOVER
-#if defined(PUSHOVER) || defined(EXTERNAL_HEARTBEAT_URL)
-#include <ESP8266HTTPClient.h>
-#endif
 boolean alertSent = false;
 
 ////////////////////////////////////////////////////////////////////////
@@ -366,6 +360,27 @@ const char* reset_reasons_esp32[] = {
 	"15: Reset when the vdd voltage is not stable",
 	"16: RTC Watch dog reset digital core and rtc module"
 };
+
+static uint8_t getResetReasonCode()
+{
+#ifdef USE_ESP32
+	return static_cast<uint8_t>(esp_reset_reason());
+#else
+	const rst_info *ri = ESP.getResetInfoPtr();
+	return ri ? static_cast<uint8_t>(ri->reason) : 0;
+#endif
+}
+
+static const char *getResetReasonText(uint8_t reasonCode)
+{
+#ifdef USE_ESP32
+	const uint8_t count = sizeof(reset_reasons_esp32) / sizeof(reset_reasons_esp32[0]);
+	return (reasonCode < count) ? reset_reasons_esp32[reasonCode] : "unknown";
+#else
+	const uint8_t count = sizeof(reset_reasons_esp8266) / sizeof(reset_reasons_esp8266[0]);
+	return (reasonCode < count) ? reset_reasons_esp8266[reasonCode] : "unknown";
+#endif
+}
 //---------------------------------------------------------------------
 #pragma endregion
 
@@ -469,10 +484,10 @@ static bool isTimeSane()
 
 static uint32_t readUint32File(const char *path)
 {
-	if (!path || !LittleFS.begin() || !LittleFS.exists(path)) {
+	if (!path || !GATEWAY_FS.begin() || !GATEWAY_FS.exists(path)) {
 		return 0;
 	}
-	File file = LittleFS.open(path, "r");
+	File file = GATEWAY_FS.open(path, "r");
 	if (!file || file.isDirectory()) {
 		return 0;
 	}
@@ -487,10 +502,10 @@ static uint32_t readUint32File(const char *path)
 
 static bool writeUint32File(const char *path, uint32_t value)
 {
-	if (!path || !LittleFS.begin()) {
+	if (!path || !GATEWAY_FS.begin()) {
 		return false;
 	}
-	File file = LittleFS.open(path, "w");
+	File file = GATEWAY_FS.open(path, "w");
 	if (!file || file.isDirectory()) {
 		return false;
 	}
@@ -516,10 +531,10 @@ static void initBootCounter()
 void logBootTime(bool ntpOk)
 {
 	dbgprintln(ico_info, "Updating bootlog");
-	boolean fsOk = LittleFS.begin();
+	boolean fsOk = GATEWAY_FS.begin();
 	if (fsOk)
 	{
-		File file = LittleFS.open("/bootlog.txt", "a");
+		File file = GATEWAY_FS.open("/bootlog.txt", "a");
 		if (!file || file.isDirectory())
 		{
 			dbgprintln(ico_error, "Error: Unable to open boot log in LittleFS");
@@ -527,10 +542,7 @@ void logBootTime(bool ntpOk)
 		else
 		{
 			char resetReason[48];
-			if (resetInfo.reason < 7)
-				strncpy(resetReason, reset_reasons_esp8266[resetInfo.reason], sizeof(resetReason) - 1);
-			else
-				snprintf(resetReason, sizeof(resetReason), "Unknown Reset reason: %u", resetInfo.reason);
+			snprintf(resetReason, sizeof(resetReason), "%s", getResetReasonText(gResetReasonCode));
 			resetReason[sizeof(resetReason) - 1] = '\0';
 
 			char timestamp[24] = {'\0'};
@@ -556,7 +568,7 @@ void logBootTime(bool ntpOk)
 			buffer[0] = '\0';
 			file.close();
 		}
-		// LittleFS.end();
+		// GATEWAY_FS.end();
 	}
 	else
 	{
@@ -579,7 +591,7 @@ void setup_OTA()
 	ArduinoOTA.onStart([]() {
 		// Clean LittleFS
 		// https://arduino-esp8266.readthedocs.io/en/latest/filesystem.html#end
-		LittleFS.end();
+		GATEWAY_FS.end();
 		dbgprintln(ico_info, "Start");
 		send_Event("[OTA] Start", "debug");
 	});
@@ -734,21 +746,53 @@ void getMessagePayload(char *payload, size_t payloadSize, MyMessage message)
 
 #include "gw_clients.h"
 
+#ifdef WITH_MQTT
+static String mqttBrokerAddress()
+{
+#ifdef MY_CONTROLLER_URL_ADDRESS
+	return String(MY_CONTROLLER_URL_ADDRESS);
+#elif defined(MY_CONTROLLER_IP_ADDRESS)
+	const IPAddress brokerIp(MY_CONTROLLER_IP_ADDRESS);
+	return brokerIp.toString();
+#else
+	return String("n/a");
+#endif
+}
+
+static void buildMqttServerHtml(char *buf, size_t buflen)
+{
+	if (!buf || buflen == 0) {
+		return;
+	}
+	const bool up = isTransportReady();
+	const String broker = mqttBrokerAddress();
+	snprintf(buf, buflen,
+			 "<b>MQTT Server</b><br />"
+			 "<table><thead><tr><th>&nbsp;</th><th>&nbsp;</th></tr></thead><tbody>"
+			 "<tr><td>broker</td><td>%s:%u</td></tr>"
+			 "<tr><td>uplink</td><td>%s</td></tr>"
+			 "<tr><td>wifi</td><td>%s (%d)</td></tr>"
+			 "</tbody></table>",
+			 broker.c_str(),
+			 static_cast<unsigned>(MY_PORT),
+			 up ? "connected" : "disconnected",
+			 (WiFi.status() == WL_CONNECTED) ? "WL_CONNECTED" : "not connected",
+			 static_cast<int>(WiFi.status()));
+}
+#endif
+
 void updateWebStats()
 {
 	char timestamp[21];
 	getCurrentTimeString(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S");
 
 	char resetReason[48];
-	if (resetInfo.reason < 7)
-		strncpy(resetReason, reset_reasons_esp8266[resetInfo.reason], sizeof(resetReason) - 1);
-	else
-		snprintf(resetReason, sizeof(resetReason), "Unbekannter Reset-Grund: %u", resetInfo.reason);
+	snprintf(resetReason, sizeof(resetReason), "%s", getResetReasonText(gResetReasonCode));
 	resetReason[sizeof(resetReason) - 1] = '\0';
 
 	char heapBuf[12], flashBuf[12], sketchBuf[12], freeSketchBuf[12];
 	formatBytes(ESP.getFreeHeap(),         heapBuf,       sizeof(heapBuf));
-	formatBytes(ESP.getFlashChipRealSize(), flashBuf,     sizeof(flashBuf));
+	formatBytes(ESP.getFlashChipSize(),     flashBuf,     sizeof(flashBuf));
 	formatBytes(ESP.getSketchSize(),        sketchBuf,    sizeof(sketchBuf));
 	formatBytes(ESP.getFreeSketchSpace(),   freeSketchBuf, sizeof(freeSketchBuf));
 
@@ -776,7 +820,7 @@ void updateWebStats()
 
 	WS_APPEND("<table><thead><tr><th>&nbsp;</th><th>&nbsp;</th></tr></thead>");
 	WS_APPEND("<tr><td>gateway started at</td><td>%s</td></tr>", getBootTime());
-	WS_APPEND("<tr><td>hostname</td><td>%s</td></tr>",           WiFi.hostname().c_str());
+	WS_APPEND("<tr><td>hostname</td><td>%s</td></tr>",           getWifiHostname().c_str());
 	WS_APPEND("<tr><td>current time</td><td>%s</td></tr>",       timestamp);
 	WS_APPEND("<tr><td>runtime</td><td>%s</td></tr>",            runtime());
 	WS_APPEND("<tr><td>build</td><td>%s %s</td></tr>",           __DATE__, __TIME__);
@@ -791,6 +835,11 @@ void updateWebStats()
 	WS_APPEND("<tr><td>mac address</td><td>%s</td></tr>",        WiFi.macAddress().c_str());
 #ifdef MY_CORE_ONLY
 	WS_APPEND("<tr><td>MY_CORE_ONLY</td><td>TRUE</td></tr>");
+#endif
+#ifdef WITH_MQTT
+	WS_APPEND("<tr><td>controller type</td><td>MQTT</td></tr>");
+	WS_APPEND("<tr><td>mqtt broker</td><td>%s:%u</td></tr>", mqttBrokerAddress().c_str(), static_cast<unsigned>(MY_PORT));
+	WS_APPEND("<tr><td>mqtt uplink</td><td>%s</td></tr>", isTransportReady() ? "connected" : "disconnected");
 #endif
 	WS_APPEND("<tr><td><a href=\"/bootlog.txt\">reset reason</a></td><td>%s</td></tr>", resetReason);
 	WS_APPEND("</table>");
@@ -912,6 +961,12 @@ void receive(const MyMessage &message)
 #endif // TELNET
 
 #ifdef WWW
+	updateSensorStateCache(static_cast<uint8_t>(message.sender),
+						   static_cast<uint8_t>(message.sensor),
+						   msgtype,
+						   payload,
+						   timestamp,
+						   message.getCommand() == C_SET);
 	if (snprintf(webjson, sizeof(webjson), "{\"time\":\"%s\",\"cmd\":\"%s\",\"sender\":\"%d\",\"sensor\":\"%d\",\"ack\":\"%c\",\"msgtype\":\"%s\",\"payload\":\"%s\"}",
 				 timestamp,
 				 cmdtype,
@@ -941,8 +996,10 @@ static wl_status_t wifiLastStatus = WL_IDLE_STATUS;
 static unsigned long lastIndicatorMs = 0;
 static int lastIndicatorCode = -1;
 
+#ifndef USE_ESP32
 WiFiEventHandler wifiDisconnectHandler;
 WiFiEventHandler wifiGotIpHandler;
+#endif
 
 static const unsigned long WIFI_BEGIN_INTERVAL_MS = 15000UL;          // retry WiFi.begin every 15s
 static const unsigned long WIFI_RECONNECT_TIMEOUT_MS = 1000UL * 60UL * 3UL; // restart only after 3 minutes
@@ -957,6 +1014,14 @@ static const char * const NTP_ALT_SERVERS[] = {
 	"216.239.35.0",
 	"129.6.15.28"
 };
+
+static void applyTimeZone()
+{
+#ifdef USE_ESP32
+	setenv("TZ", TZ_INFO, 1);
+	tzset();
+#endif
+}
 
 static void requestNtpSync(bool force = false)
 {
@@ -984,7 +1049,11 @@ static void requestNtpSync(bool force = false)
 		s3 = NTP_ALT_SERVERS[k];
 	}
 
+#ifdef USE_ESP32
+	configTzTime(TZ_INFO, s1, s2, s3);
+#else
 	configTime(TZ_INFO, s1, s2, s3);
+#endif
 	dbgprintf(ico_info, "[NTP] sync requested (%s, %s, %s)", s1, s2, s3);
 	ntpServerSetIndex = static_cast<uint8_t>((ntpServerSetIndex + 1) % (altCount + 1));
 #else
@@ -1063,6 +1132,27 @@ void logWifiStatus(const char *reason)
 
 void setupWifiEventLogging()
 {
+#ifdef USE_ESP32
+	WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+		if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+			dbgprintf(ico_error,
+					  "[WiFiEvt] disconnected | reason=%u (%s) | status=%s (%d) | RSSI=%d",
+					  info.wifi_sta_disconnected.reason,
+					  wifiDisconnectReasonToString(info.wifi_sta_disconnected.reason),
+					  wifiStatusToString(WiFi.status()),
+					  static_cast<int>(WiFi.status()),
+					  WiFi.RSSI());
+		} else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+			dbgprintf(ico_ok,
+					  "[WiFiEvt] got-ip | ip=%s | status=%s (%d) | RSSI=%d",
+					  WiFi.localIP().toString().c_str(),
+					  wifiStatusToString(WiFi.status()),
+					  static_cast<int>(WiFi.status()),
+					  WiFi.RSSI());
+			requestNtpSync(true);
+		}
+	});
+#else
 	wifiDisconnectHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected &event) {
 		dbgprintf(ico_error,
 				  "[WiFiEvt] disconnected | reason=%u (%s) | ssid=%s | status=%s (%d) | RSSI=%d",
@@ -1085,6 +1175,7 @@ void setupWifiEventLogging()
 				  WiFi.RSSI());
 		requestNtpSync(true);
 	});
+#endif
 }
 
 void loop_Wifi()
@@ -1195,16 +1286,20 @@ void pushover(const char *message, const char *title = "MySensors Gateway")
 {
 	WiFiClientSecure client;
 	HTTPClient http;
+#ifndef USE_ESP32
 	client.setInsecure();
+#endif
 	Serial.println("Pushover: connecting ...");
 	if (!client.connect("api.pushover.net", 443))
 	{
 		char err_buf[100];
+#ifndef USE_ESP32
 		if (client.getLastSSLError(err_buf, 100) < 0)
 		{
 			Serial.printf_P(PSTR("Pushover: connection failed: %s\n"), err_buf);
 		}
 		else
+#endif
 		{
 			Serial.printf_P(PSTR("Pushover: connection failed. Could not connect to api.pushover.net:443.\n"));
 		}
@@ -1268,7 +1363,7 @@ static void sendExternalHeartbeat()
 				 static_cast<unsigned long>(ESP.getFreeHeap()),
 				 WiFi.RSSI(),
 				 static_cast<int>(WiFi.status()),
-				 static_cast<unsigned>(resetInfo.reason),
+				 static_cast<unsigned>(gResetReasonCode),
 				 bootTimeSynced ? 1U : 0U,
 				 static_cast<unsigned long>(lastBootEpoch)) < 0) {
 		return;
@@ -1283,7 +1378,7 @@ static void sendExternalHeartbeat()
 		return;
 	}
 	http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-	const int code = http.POST(reinterpret_cast<const uint8_t *>(body), strlen(body));
+	const int code = http.POST(String(body));
 	dbgprintf(code < 200 || code > 299 ? ico_warning : ico_info,
 			  "heartbeat -> %s (%d)", EXTERNAL_HEARTBEAT_URL, code);
 	http.end();
@@ -1435,13 +1530,8 @@ void indication(const indication_t indicator)
 //
 void setup()
 {
-	// esp8266 reset reasons
-  	rst_info *resetInfo;
-  	resetInfo = ESP.getResetInfoPtr();
-	// Serial.println(resetInfo->reason);
-
-	// esp32 reset reasons
-	// int rtc_reset_reason = rtc_get_reset_reason(0);    
+	gResetReasonCode = getResetReasonCode();
+	applyTimeZone();
 
 #ifdef MY_DEBUG
 	Serial.begin(9600);
@@ -1453,10 +1543,11 @@ void setup()
 	Serial.printf("Build: %s %s\n", __DATE__, __TIME__);
 	Serial.printf("SW version: %s\n", __SWVERSION__);
 	
-	// esp8266
-	Serial.printf("Reset reason code: %d\n", resetInfo->reason);
-	Serial.printf("Reset reason text: %s\n", ESP.getResetReason().c_str());
+	Serial.printf("Reset reason code: %u\n", static_cast<unsigned>(gResetReasonCode));
+	Serial.printf("Reset reason text: %s\n", getResetReasonText(gResetReasonCode));
+#ifndef USE_ESP32
 	Serial.printf("Reset info: %s\n", ESP.getResetInfo().c_str());
+#endif
 #endif
 
 	cpuLastMicros = micros();
@@ -1468,7 +1559,7 @@ void setup()
 #ifdef TELNET
 	telnetServer.begin();
 	//telnetServer.setNoDelay(true); // drops chars if set true
-	telnetServer.printf("Reset reason %s\n", reset_reasons_esp8266[resetInfo->reason]);
+	telnetServer.printf("Reset reason %s\n", getResetReasonText(gResetReasonCode));
 #endif // TELNET
 
 #ifdef NTP
@@ -1491,7 +1582,7 @@ void setup()
 	}
 	
 	// boolean fsOK = 
-	LittleFS.begin();// Filesystem mounten
+	GATEWAY_FS.begin();// Filesystem mounten
 	initBootCounter();
 
 	// initialize statistics
@@ -1508,7 +1599,7 @@ void setup()
 		logBootTime(false);
 	}
 #ifdef WWW
-	updateHealthSnapshot(bootCount, lastBootEpoch, static_cast<uint8_t>(resetInfo->reason), bootTimeSynced);
+	updateHealthSnapshot(bootCount, lastBootEpoch, gResetReasonCode, bootTimeSynced);
 #endif
 }
 //---------------------------------------------------------------------
@@ -1606,12 +1697,12 @@ void loop()
 		prev_time = millis();
 		yield();
 #ifdef WWW
-		updateHealthSnapshot(bootCount, lastBootEpoch, static_cast<uint8_t>(resetInfo.reason), bootTimeSynced);
+		updateHealthSnapshot(bootCount, lastBootEpoch, gResetReasonCode, bootTimeSynced);
 #endif
 
 		char timestamp[22];
 		getCurrentTimeString(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S");
-		uint32 heap = system_get_free_heap_size();
+		uint32_t heap = ESP.getFreeHeap();
 		if ((alertSent == false) && (heap < 10.0))
 		{
 			pushover("Heap size < 10Kb !!!");
@@ -1631,8 +1722,8 @@ void loop()
 					 runtime(),
 					 getCpuDelta(),
 					 heapFmt,
-					 ESP.getHeapFragmentation(),
-					 ESP.getMaxFreeBlockSize()) < 0)
+					 getHeapFragmentationPct(),
+					 getMaxFreeBlockBytes()) < 0)
 		{
 			strcpy(buf, "<div class=\"error\">error</div>");
 		}
@@ -1640,11 +1731,18 @@ void loop()
 		timestamp[0] = {'\0'};
 		buf[0] = {'\0'};
 
-		char telem[256];
+		const bool controllerUp = isTransportReady();
+#ifdef WITH_MQTT
+		const char *controllerType = "mqtt";
+#else
+		const char *controllerType = "gateway";
+#endif
+
+		char telem[320];
 		buildTelemetryJson(telem, sizeof(telem),
 			heap,
-			ESP.getHeapFragmentation(),
-			ESP.getMaxFreeBlockSize(),
+			getHeapFragmentationPct(),
+			getMaxFreeBlockBytes(),
 			WiFi.RSSI(),
 			wifiStatusToString(WiFi.status()),
 			lastIndicatorCode,
@@ -1652,7 +1750,9 @@ void loop()
 			gatewayTxMessage,
 			sensorRxMessage,
 			sensorTxMessage,
-			indicatorTxErrors);
+			indicatorTxErrors,
+			controllerUp,
+			controllerType);
 		send_Event(telem, "telemetry");
 
 		static unsigned long lastControllerDiagMs = 0;
@@ -1666,9 +1766,9 @@ void loop()
 					  WiFi.RSSI(),
 					  WiFi.SSID().c_str(),
 					  WiFi.localIP().toString().c_str(),
-					  system_get_free_heap_size(),
-					  ESP.getHeapFragmentation(),
-					  ESP.getMaxFreeBlockSize(),
+					  ESP.getFreeHeap(),
+					  getHeapFragmentationPct(),
+					  getMaxFreeBlockBytes(),
 					  lastIndicatorCode,
 					  (lastIndicatorMs == 0 ? 0UL : millis() - lastIndicatorMs));
 		}
@@ -1684,7 +1784,11 @@ void loop()
 			lastGwClientsSendMs = millis();
 			static char clientsBuf[640];
 			clientsBuf[0] = '\0';
+#ifdef WITH_MQTT
+			buildMqttServerHtml(clientsBuf, sizeof(clientsBuf));
+#else
 			buildGwClientsHtml(clientsBuf, sizeof(clientsBuf));
+#endif
 			send_Event(clientsBuf, "clients");
 		}
 	}

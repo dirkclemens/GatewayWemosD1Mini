@@ -6,15 +6,19 @@ void buildTelemetryJson(char *buf, size_t buflen,
                         const char *wifiStatus, int lastIndicatorCode,
                         unsigned long gwRx, unsigned long gwTx,
                         unsigned long sensorRx, unsigned long sensorTx,
-                        unsigned long indicatorErrors)
+                        unsigned long indicatorErrors,
+                        bool controllerUp,
+                        const char *controllerType)
 {
 	if (snprintf(buf, buflen,
 	             "{\"heap\":%lu,\"frag\":%u,\"maxblk\":%lu,\"rssi\":%ld,\"wifi\":\"%s\","
-	             "\"lastInd\":%d,\"gwRx\":%lu,\"gwTx\":%lu,\"sRx\":%lu,\"sTx\":%lu,\"err\":%lu}",
+	             "\"lastInd\":%d,\"gwRx\":%lu,\"gwTx\":%lu,\"sRx\":%lu,\"sTx\":%lu,\"err\":%lu,"
+	             "\"ctrlUp\":%s,\"ctrlType\":\"%s\"}",
 	             (unsigned long)heap, (unsigned)frag, (unsigned long)maxBlock, (long)rssi,
 	             wifiStatus, lastIndicatorCode,
-	             gwRx, gwTx, sensorRx, sensorTx, indicatorErrors) < 0) {
+	             gwRx, gwTx, sensorRx, sensorTx, indicatorErrors,
+	             controllerUp ? "true" : "false",
+	             controllerType ? controllerType : "none") < 0) {
 		buf[0] = '{'; buf[1] = '}'; buf[2] = '\0';
 	}
 }
-

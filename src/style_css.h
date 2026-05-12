@@ -161,7 +161,7 @@ main { padding-top: calc(var(--nav-h) + 10px); }
 #page-info #infoContent,
 #page-info #gwClientsContent {
     width: 100%;
-    display: flex;
+    text-align: center;
     justify-content: center;
 }
 #infoContent table { width: 100%; max-width: 620px; border-collapse: collapse; }

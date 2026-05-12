@@ -55,12 +55,12 @@ const char index_html[] PROGMEM = R"=====(
     var es = new EventSource('/events');
     es.onopen = function() {
       var el = document.getElementById('connStatus');
-      el.textContent = '● online'; el.className = 'conn-status conn-ok';
+      el.textContent = 'SSE ●'; el.className = 'conn-status conn-ok';
     };
     es.onerror = function(e) {
       if (e.target.readyState != EventSource.OPEN) {
         var el = document.getElementById('connStatus');
-        el.textContent = '○ offline'; el.className = 'conn-status conn-err';
+        el.textContent = 'SSE ○'; el.className = 'conn-status conn-err';
       }
     };
     es.addEventListener('debug',     function(e){ appendLogLine('debug',     e.data, detectLevel(e.data)); }, false);
@@ -172,6 +172,11 @@ const char index_html[] PROGMEM = R"=====(
 
   // ── Telemetry badges & chart ──────────────────────────────────────
   function updateBadges(t) {
+    var conn = document.getElementById('connStatus');
+    if (t && t.ctrlType === 'mqtt') {
+      conn.textContent = t.ctrlUp ? 'MQTT ●' : 'MQTT ○';
+      conn.className = t.ctrlUp ? 'conn-status conn-ok' : 'conn-status conn-err';
+    }
     document.getElementById('wifiBadge').textContent  = 'WiFi: '+(t.wifi||'?');
     document.getElementById('rssiBadge').textContent  = 'RSSI: '+t.rssi+' dBm';
     document.getElementById('heapBadge').textContent  = 'Heap: '+t.heap;
@@ -204,6 +209,15 @@ const char index_html[] PROGMEM = R"=====(
   }
 
   // ── Node names ────────────────────────────────────────────────────
+  function loadSensorState() {
+    fetch('/api/sensor-state')
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        sensorState = d || {};
+        if (currentTab === 'sensors') renderSensorPanel();
+      })
+      .catch(function(e){ console.log('sensor state failed', e); });
+  }
   function loadNodeNames() {
     fetch('/api/node-names')
       .then(function(r){ return r.json(); })
@@ -246,6 +260,7 @@ const char index_html[] PROGMEM = R"=====(
   // ── Init ──────────────────────────────────────────────────────────
   function init() {
     setTab('messages');
+    loadSensorState();
     startEvents();
     loadNodeNames();
     setLogLevel('info');

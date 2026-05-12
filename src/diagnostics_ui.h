@@ -8,5 +8,6 @@ void buildTelemetryJson(char *buf, size_t buflen,
                         const char *wifiStatus, int lastIndicatorCode,
                         unsigned long gwRx, unsigned long gwTx,
                         unsigned long sensorRx, unsigned long sensorTx,
-                        unsigned long indicatorErrors);
-
+                        unsigned long indicatorErrors,
+                        bool controllerUp,
+                        const char *controllerType);

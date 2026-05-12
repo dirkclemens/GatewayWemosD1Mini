@@ -8,6 +8,7 @@
 #include "config.h"
 #include "common.h"
 #include "uptime.h"
+#include "platform_compat.h"
 
 #include "index.h"
 #include "style_css.h"
@@ -15,9 +16,11 @@
 // #include "svg_gz.h"
 
 #include <ArduinoOTA.h>
-#include <ESP8266WiFi.h>
-#include <ESPAsyncTCP.h>
-#include <ESP8266mDNS.h>
+#ifdef USE_ESP32
+  #include <AsyncTCP.h>
+#else
+  #include <ESPAsyncTCP.h>
+#endif
 #include <ESPAsyncWebServer.h>
 #include <cstring>
 
@@ -36,10 +39,18 @@ static uint32_t gLastBootEpoch = 0;
 static uint8_t gResetReasonCode = 0;
 static bool gNtpSynced = false;
 
-// because SPIFFS is deprecated
-#include <LittleFS.h>
-// #define SPIFFS LittleFS
-// #include "FS.h" 
+#ifdef USE_ESP32
+static const uint16_t SENSOR_STATE_SLOTS = 256;
+struct SensorStateEntry {
+	uint8_t nodeId;
+	uint8_t sensorId;
+	char value[48];
+	char time[24];
+	char type[24];
+	bool used;
+};
+static SensorStateEntry sensorStates[SENSOR_STATE_SLOTS];
+#endif
 
 //flag to use from web update to reboot the ESP
 bool shouldReboot 							= false;
@@ -97,6 +108,140 @@ static int findFreeNodeNameSlot()
 	return -1;
 }
 
+#ifdef USE_ESP32
+static int findSensorStateIndex(uint8_t nodeId, uint8_t sensorId)
+{
+	for (uint16_t i = 0; i < SENSOR_STATE_SLOTS; i++) {
+		if (sensorStates[i].used && sensorStates[i].nodeId == nodeId && sensorStates[i].sensorId == sensorId) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static int findFreeSensorStateSlot()
+{
+	for (uint16_t i = 0; i < SENSOR_STATE_SLOTS; i++) {
+		if (!sensorStates[i].used) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static void appendJsonEscaped(String &out, const char *text)
+{
+	if (!text) {
+		return;
+	}
+	const char *p = text;
+	while (*p) {
+		if (*p == '\\') {
+			out += "\\\\";
+		} else if (*p == '"') {
+			out += "\\\"";
+		} else {
+			out += *p;
+		}
+		p++;
+	}
+}
+
+static String sensorStateAsJson()
+{
+	bool hasNode[256] = {false};
+	for (uint16_t i = 0; i < SENSOR_STATE_SLOTS; i++) {
+		if (sensorStates[i].used) {
+			hasNode[sensorStates[i].nodeId] = true;
+		}
+	}
+
+	String out = "{";
+	bool firstNode = true;
+	for (uint16_t node = 0; node <= 255; node++) {
+		if (!hasNode[node]) {
+			continue;
+		}
+		if (!firstNode) {
+			out += ",";
+		}
+		firstNode = false;
+		out += "\"";
+		out += node;
+		out += "\":{";
+
+		bool firstSensor = true;
+		for (uint16_t i = 0; i < SENSOR_STATE_SLOTS; i++) {
+			if (!sensorStates[i].used || sensorStates[i].nodeId != node) {
+				continue;
+			}
+			if (!firstSensor) {
+				out += ",";
+			}
+			firstSensor = false;
+			out += "\"";
+			out += sensorStates[i].sensorId;
+			out += "\":{\"value\":\"";
+			appendJsonEscaped(out, sensorStates[i].value);
+			out += "\",\"time\":\"";
+			appendJsonEscaped(out, sensorStates[i].time);
+			out += "\",\"type\":\"";
+			appendJsonEscaped(out, sensorStates[i].type);
+			out += "\"}";
+		}
+		out += "}";
+	}
+	out += "}";
+	return out;
+}
+#endif
+
+static void appendFsListing(AsyncResponseStream *resp, bool asJson)
+{
+#ifdef USE_ESP32
+	File root = GATEWAY_FS.open("/");
+	if (!root || !root.isDirectory()) {
+		return;
+	}
+	File file = root.openNextFile();
+	bool first = true;
+	while (file) {
+		if (asJson) {
+			if (!first) {
+				resp->print(",");
+			}
+			resp->printf("{\"path\":\"%s\",\"size\":%lu}",
+						 file.name(),
+						 static_cast<unsigned long>(file.size()));
+		} else {
+			char szBuf[12];
+			formatBytes(file.size(), szBuf, sizeof(szBuf));
+			resp->printf("FS File: %s, size: %s\n", file.name(), szBuf);
+		}
+		first = false;
+		file = root.openNextFile();
+	}
+#else
+	Dir dir = GATEWAY_FS.openDir("/");
+	bool first = true;
+	while (dir.next()) {
+		if (asJson) {
+			if (!first) {
+				resp->print(",");
+			}
+			resp->printf("{\"path\":\"%s\",\"size\":%lu}",
+						 dir.fileName().c_str(),
+						 static_cast<unsigned long>(dir.fileSize()));
+		} else {
+			char szBuf[12];
+			formatBytes(dir.fileSize(), szBuf, sizeof(szBuf));
+			resp->printf("FS File: %s, size: %s\n", dir.fileName().c_str(), szBuf);
+		}
+		first = false;
+	}
+#endif
+}
+
 static void loadNodeNames()
 {
 	for (uint16_t i = 0; i < NODE_NAME_SLOTS; i++) {
@@ -104,14 +249,14 @@ static void loadNodeNames()
 		nodeNames[i].name = "";
 		nodeNames[i].used = false;
 	}
-	if (!LittleFS.begin()) {
+	if (!gatewayFsBegin()) {
 		dbgprintln(ico_error, "could not open LittleFS for node name loading");
 		return;
 	}
-	if (!LittleFS.exists(NODE_NAMES_FILE)) {
+	if (!GATEWAY_FS.exists(NODE_NAMES_FILE)) {
 		return;
 	}
-	File file = LittleFS.open(NODE_NAMES_FILE, "r");
+	File file = GATEWAY_FS.open(NODE_NAMES_FILE, "r");
 	if (!file) {
 		dbgprintln(ico_error, "could not open node_names.txt");
 		return;
@@ -149,11 +294,11 @@ static void loadNodeNames()
 
 static bool saveNodeNames()
 {
-	if (!LittleFS.begin()) {
+	if (!gatewayFsBegin()) {
 		dbgprintln(ico_error, "could not open LittleFS for node name saving");
 		return false;
 	}
-	File file = LittleFS.open(NODE_NAMES_FILE, "w");
+	File file = GATEWAY_FS.open(NODE_NAMES_FILE, "w");
 	if (!file) {
 		dbgprintln(ico_error, "could not write node_names.txt");
 		return false;
@@ -215,6 +360,45 @@ void send_Event(const char *content, const char *section)
 	events.send(content, section);
 }
 
+void updateSensorStateCache(uint8_t nodeId,
+							uint8_t sensorId,
+							const char *msgType,
+							const char *payload,
+							const char *timestamp,
+							bool isSetMessage)
+{
+#ifdef USE_ESP32
+	if (!isSetMessage) {
+		return;
+	}
+
+	int idx = findSensorStateIndex(nodeId, sensorId);
+	if (idx < 0) {
+		idx = findFreeSensorStateSlot();
+		if (idx < 0) {
+			return;
+		}
+	}
+
+	sensorStates[idx].used = true;
+	sensorStates[idx].nodeId = nodeId;
+	sensorStates[idx].sensorId = sensorId;
+	strncpy(sensorStates[idx].value, payload ? payload : "", sizeof(sensorStates[idx].value) - 1);
+	sensorStates[idx].value[sizeof(sensorStates[idx].value) - 1] = '\0';
+	strncpy(sensorStates[idx].time, timestamp ? timestamp : "", sizeof(sensorStates[idx].time) - 1);
+	sensorStates[idx].time[sizeof(sensorStates[idx].time) - 1] = '\0';
+	strncpy(sensorStates[idx].type, msgType ? msgType : "", sizeof(sensorStates[idx].type) - 1);
+	sensorStates[idx].type[sizeof(sensorStates[idx].type) - 1] = '\0';
+#else
+	(void)nodeId;
+	(void)sensorId;
+	(void)msgType;
+	(void)payload;
+	(void)timestamp;
+	(void)isSetMessage;
+#endif
+}
+
 void updateHealthSnapshot(uint32_t bootCount,
 						  uint32_t lastBootEpoch,
 						  uint8_t resetReasonCode,
@@ -265,16 +449,19 @@ const char * const RST_REASONS[] = {
 // https://arduino-esp8266.readthedocs.io/en/latest/libraries.html#esp-specific-apis
 void send_Status(AsyncWebServerRequest *request)
 {
-	uint32_t realSize = ESP.getFlashChipRealSize();
+	uint32_t realSize = ESP.getFlashChipSize();
 	uint32_t ideSize = ESP.getFlashChipSize();
-	FlashMode_t ideMode = ESP.getFlashChipMode();
-	uint8_t heapFragmentation = ESP.getHeapFragmentation();
-	uint32_t maxFreeBlocks = ESP.getMaxFreeBlockSize();
+	uint8_t heapFragmentation = getHeapFragmentationPct();
+	uint32_t maxFreeBlocks = getMaxFreeBlockBytes();
 
 	AsyncResponseStream *resp = request->beginResponseStream("text/plain");
 	resp->print ("Status\n-----------------------------\n");
+#ifdef USE_ESP32
+	resp->printf("             Chip model: ESP32\n");
+#else
 	resp->printf("        ESP Chip id: 0x%8x\n", ESP.getChipId());
 	resp->printf("      Flash real id: 0x%8x\n", ESP.getFlashChipId());
+#endif
 	resp->println();
 	resp->printf("               Heap: %d bytes\n", ESP.getFreeHeap());
 	resp->printf(" Heap Fragmentation: %d %%\n", heapFragmentation);
@@ -283,17 +470,21 @@ void send_Status(AsyncWebServerRequest *request)
 	resp->printf("    Flash ide  size: %d bytes\n", ideSize);
 	resp->printf("          CPU speed: %d MHz\n",  ESP.getCpuFreqMHz());
 	resp->printf("    Flash ide speed: %d MHz\n",  ESP.getFlashChipSpeed()/1000/1000);
+#ifndef USE_ESP32
+	FlashMode_t ideMode = ESP.getFlashChipMode();
 	resp->print ("    Flash ide  mode: " + String(ideMode == FM_QIO ? "QIO" : ideMode == FM_QOUT ? "QOUT" : ideMode == FM_DIO ? "DIO" : ideMode == FM_DOUT ? "DOUT" : "UNKNOWN") + "\n");
-	resp->println();
 	resp->printf("              Flash: %s\n", FLASH_SIZE_MAP_NAMES[system_get_flash_size_map()]);
+#endif
 	resp->println();
-
-	const rst_info * resetInfo = system_get_rst_info();
-  	resp->printf("       reset reason: %s\n", RST_REASONS[resetInfo->reason]);
+#ifdef USE_ESP32
+	resp->printf("       reset reason: %d\n", static_cast<int>(esp_reset_reason()));
+#else
+	resp->printf("       reset reason: %s\n", ESP.getResetReason().c_str());
+#endif
 	resp->println();
 
 	resp->printf("          boot time: %s\n", getBootTime());
-	resp->printf("           hostname: %s\n", WiFi.hostname().c_str());
+	resp->printf("           hostname: %s\n", getWifiHostname().c_str());
 	resp->printf("            runtime: %s\n", runtime());
 	resp->printf("             uptime: %s\n", uptime());
 	resp->printf("              build: %s %s\n", __DATE__, __TIME__);
@@ -306,12 +497,16 @@ void send_Status(AsyncWebServerRequest *request)
 	resp->println();
 
 	// https://arduino-esp8266.readthedocs.io/en/latest/filesystem.html#file-object
-	boolean fsOk = LittleFS.begin();
+	boolean fsOk = gatewayFsBegin();
 	if (fsOk) 
 	{	
 		resp->print ("Filesystem\n-----------------------------\n");
+#ifdef USE_ESP32
+		resp->printf("      FS totalBytes: %lu bytes\n", static_cast<unsigned long>(GATEWAY_FS.totalBytes()));
+		resp->printf("      FS  usedBytes: %lu bytes\n", static_cast<unsigned long>(GATEWAY_FS.usedBytes()));
+#else
 		FSInfo fs_info;
-		if (LittleFS.info(fs_info))
+		if (GATEWAY_FS.info(fs_info))
 		{
 			resp->printf("      FS totalBytes: %d bytes\n", fs_info.totalBytes);
 			resp->printf("      FS  usedBytes: %d bytes\n", fs_info.usedBytes);
@@ -319,20 +514,16 @@ void send_Status(AsyncWebServerRequest *request)
 			resp->printf("      FS   pageSize: %d bytes\n", fs_info.pageSize);
 			resp->printf("       maxOpenFiles: %d \n", fs_info.maxOpenFiles);
 			resp->printf("      maxPathLength: %d \n", fs_info.maxPathLength);
-			resp->println();
 		}
+#endif
+		resp->println();
 
 		resp->print ("Files\n-----------------------------\n");
-		Dir dir = LittleFS.openDir("/");
-		while (dir.next()) {
-			char szBuf[12];
-			formatBytes(dir.fileSize(), szBuf, sizeof(szBuf));
-			resp->printf("FS File: %s, size: %s\n", dir.fileName().c_str(), szBuf);
-		}
+		appendFsListing(resp, false);
 		resp->println();
 
 		resp->print ("Bootlog\n-----------------------------\n");
-		File file = LittleFS.open("/bootlog.txt", "r");
+		File file = GATEWAY_FS.open("/bootlog.txt", "r");
 		while (file.available()) {
 			resp->printf("%s\n", file.readStringUntil('\n').c_str());
 			// resp->printf("%s\n", file.readString().c_str());
@@ -371,7 +562,7 @@ String processor(const String& var)
 void setup_WebServer()
 {
 	// boolean fsOK = 
-	LittleFS.begin();// Filesystem mounten
+	gatewayFsBegin();// Filesystem mounten
 	loadNodeNames();
 
 	events.onConnect([](AsyncEventSourceClient *client) {
@@ -413,6 +604,14 @@ void setup_WebServer()
 
 	server.on("/api/node-names", HTTP_GET, [](AsyncWebServerRequest *request){
 		request->send(200, "application/json", nodeNamesAsJson());
+	});
+
+	server.on("/api/sensor-state", HTTP_GET, [](AsyncWebServerRequest *request){
+#ifdef USE_ESP32
+		request->send(200, "application/json", sensorStateAsJson());
+#else
+		request->send(200, "application/json", "{}");
+#endif
 	});
 
 	server.on("/api/node-name", HTTP_POST, [](AsyncWebServerRequest *request){
@@ -459,11 +658,11 @@ void setup_WebServer()
 	server.on("/bootlog.txt", [](AsyncWebServerRequest *request){
 		AsyncResponseStream *resp = request->beginResponseStream("text/plain");
 		dbgprintln(ico_info, "start reading from bootlog.txt");
-		boolean fsOk = LittleFS.begin();
+		boolean fsOk = gatewayFsBegin();
 		if (fsOk) 
 		{	
 			dbgprintln(ico_info, "LittleFS is open, start reading file ...");
-			File file = LittleFS.open("/bootlog.txt", "r");
+			File file = GATEWAY_FS.open("/bootlog.txt", "r");
 			while (file.available()) {
 				resp->printf("%s\n", file.readStringUntil('\n').c_str());
 			}			
@@ -480,7 +679,7 @@ void setup_WebServer()
 	});
 
 	server.on("/fs", HTTP_GET, [](AsyncWebServerRequest *request){
-		if (!LittleFS.begin()) {
+		if (!gatewayFsBegin()) {
 			request->send(500, "application/json", "{\"ok\":false,\"error\":\"LittleFS unavailable\"}");
 			return;
 		}
@@ -488,17 +687,7 @@ void setup_WebServer()
 		if (!request->hasParam("path")) {
 			AsyncResponseStream *resp = request->beginResponseStream("application/json");
 			resp->print("{\"ok\":true,\"files\":[");
-			bool first = true;
-			Dir dir = LittleFS.openDir("/");
-			while (dir.next()) {
-				if (!first) {
-					resp->print(",");
-				}
-				first = false;
-				resp->printf("{\"path\":\"%s\",\"size\":%lu}",
-							 dir.fileName().c_str(),
-							 static_cast<unsigned long>(dir.fileSize()));
-			}
+			appendFsListing(resp, true);
 			resp->print("]}");
 			request->send(resp);
 			return;
@@ -509,20 +698,20 @@ void setup_WebServer()
 			request->send(400, "application/json", "{\"ok\":false,\"error\":\"invalid path\"}");
 			return;
 		}
-		if (!LittleFS.exists(path)) {
+		if (!GATEWAY_FS.exists(path)) {
 			request->send(404, "application/json", "{\"ok\":false,\"error\":\"file not found\"}");
 			return;
 		}
 
-		request->send(LittleFS, path, guessContentType(path), false);
+		request->send(GATEWAY_FS, path, guessContentType(path), false);
 	});
 
 	server.on("/wipe", [](AsyncWebServerRequest *request){
 		dbgprintln(ico_info, "removing bootlog.txt");
-		boolean fsOk = LittleFS.begin();
+		boolean fsOk = gatewayFsBegin();
 		if (fsOk) 
 		{	
-			LittleFS.remove("/bootlog.txt");
+			GATEWAY_FS.remove("/bootlog.txt");
 		}
 		else 
 		{
@@ -537,7 +726,7 @@ void setup_WebServer()
 
 	server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
 		AsyncWebServerResponse *response = request->beginResponse_P(200, "text/html", index_html, nullptr);
-		response->addHeader("Server", WiFi.hostname().c_str());
+		response->addHeader("Server", getWifiHostname().c_str());
 		request->send(response);
 		// request->send_P(200, "text/html", index_html, processor);
 	});	
@@ -559,7 +748,7 @@ void setup_WebServer()
 				 "\"reset_reason_code\":%u,\"reset_reason\":\"%s\",\"uptime_s\":%lu,"
 				 "\"wifi_connected\":%s,\"wifi_status\":%d,\"heap\":%lu,\"heap_frag\":%u,"
 				 "\"max_free_block\":%lu,\"rssi\":%d,\"sse_clients\":%u,\"now_epoch\":%lu}",
-				 WiFi.hostname().c_str(),
+				 getWifiHostname().c_str(),
 				 static_cast<unsigned long>(gBootCount),
 				 static_cast<unsigned long>(gLastBootEpoch),
 				 gNtpSynced ? "true" : "false",
@@ -569,8 +758,8 @@ void setup_WebServer()
 				 wifiConnected ? "true" : "false",
 				 static_cast<int>(WiFi.status()),
 				 static_cast<unsigned long>(ESP.getFreeHeap()),
-				 static_cast<unsigned>(ESP.getHeapFragmentation()),
-				 static_cast<unsigned long>(ESP.getMaxFreeBlockSize()),
+				 static_cast<unsigned>(getHeapFragmentationPct()),
+				 static_cast<unsigned long>(getMaxFreeBlockBytes()),
 				 WiFi.RSSI(),
 				 static_cast<unsigned>(events.count()),
 				 nowEpoch);
