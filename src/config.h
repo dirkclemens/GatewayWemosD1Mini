@@ -19,7 +19,6 @@
 #define EXTERNAL_HEARTBEAT_URL "http://192.168.2.222:18080/mysensors/heartbeat"
 #define EXTERNAL_HEARTBEAT_INTERVAL_MS 60000UL
 
-// https://fipsok.de/Esp8266-Webserver/ntp-zeit-esp8266.tab
 // enter your time zone (https://remotemonitoringsystems.ca/time-zone-abbreviations.php)
 static const char TZ_INFO[] = "CET-1CEST-2,M3.5.0/02:00:00,M10.5.0/03:00:00";
 static const char * const NTP_SERVER[] = {"fritz.box", "de.pool.ntp.org", "ptbtime1.ptb.de", "europe.pool.ntp.org"};

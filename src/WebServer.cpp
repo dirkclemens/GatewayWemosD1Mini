@@ -1,7 +1,5 @@
 /*
- *  https://tttapa.github.io/ESP8266/Chap09%20-%20Web%20Server.html
- * 
- * 
+ * GatewayESP32 WebServer
  */
 
 #include "WebServer.h"
@@ -16,11 +14,7 @@
 // #include "svg_gz.h"
 
 #include <ArduinoOTA.h>
-#ifdef USE_ESP32
-  #include <AsyncTCP.h>
-#else
-  #include <ESPAsyncTCP.h>
-#endif
+#include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <cstring>
 #include <cstdlib>
@@ -43,14 +37,9 @@ static char gResetReasonText[64] = {'\0'};
 static char gResetReasonRaw[128] = {'\0'};
 static char gLastRestartMarker[160] = {'\0'};
 static bool gNtpSynced = false;
-#ifdef WITH_WEB_DEBUG
 static bool gWebDebugEnabled = false;
-#else
-static bool gWebDebugEnabled = false;
-#endif
 static bool gWebLiveUiEnabled = false;
 
-#ifdef USE_ESP32
 static const uint16_t SENSOR_STATE_SLOTS = 256;
 struct SensorStateEntry {
 	uint8_t nodeId;
@@ -189,7 +178,6 @@ static bool shouldAcceptSensorValue(uint8_t nodeId,
 	// Keep known free-form values (e.g. V_TEXT, V_CUSTOM) after basic checks above.
 	return true;
 }
-#endif
 
 //flag to use from web update to reboot the ESP
 bool shouldReboot 							= false;
@@ -291,7 +279,6 @@ static bool writeRestartMarker(const char *reason)
 	return true;
 }
 
-#ifdef USE_ESP32
 static int findSensorStateIndex(uint8_t nodeId, uint8_t sensorId)
 {
 	for (uint16_t i = 0; i < SENSOR_STATE_SLOTS; i++) {
@@ -375,11 +362,9 @@ static void sendSensorStateJson(AsyncWebServerRequest *request)
 	resp->print("}");
 	request->send(resp);
 }
-#endif
 
 static void appendFsListing(AsyncResponseStream *resp, bool asJson)
 {
-#ifdef USE_ESP32
 	File root = GATEWAY_FS.open("/");
 	if (!root || !root.isDirectory()) {
 		return;
@@ -402,25 +387,6 @@ static void appendFsListing(AsyncResponseStream *resp, bool asJson)
 		first = false;
 		file = root.openNextFile();
 	}
-#else
-	Dir dir = GATEWAY_FS.openDir("/");
-	bool first = true;
-	while (dir.next()) {
-		if (asJson) {
-			if (!first) {
-				resp->print(",");
-			}
-			resp->printf("{\"path\":\"%s\",\"size\":%lu}",
-						 dir.fileName().c_str(),
-						 static_cast<unsigned long>(dir.fileSize()));
-		} else {
-			char szBuf[12];
-			formatBytes(dir.fileSize(), szBuf, sizeof(szBuf));
-			resp->printf("FS File: %s, size: %s\n", dir.fileName().c_str(), szBuf);
-		}
-		first = false;
-	}
-#endif
 }
 
 static void loadNodeNames()
@@ -431,7 +397,7 @@ static void loadNodeNames()
 		nodeNames[i].used = false;
 	}
 	if (!gatewayFsBegin()) {
-		dbgprintln(ico_error, "could not open LittleFS for node name loading");
+		dbgprintln(ico_error, "could not open filesystem for node name loading");
 		return;
 	}
 	if (!GATEWAY_FS.exists(NODE_NAMES_FILE)) {
@@ -476,7 +442,7 @@ static void loadNodeNames()
 static bool saveNodeNames()
 {
 	if (!gatewayFsBegin()) {
-		dbgprintln(ico_error, "could not open LittleFS for node name saving");
+		dbgprintln(ico_error, "could not open filesystem for node name saving");
 		return false;
 	}
 	File file = GATEWAY_FS.open(NODE_NAMES_FILE, "w");
@@ -588,7 +554,6 @@ bool updateSensorStateCache(uint8_t nodeId,
 							const char *timestamp,
 							bool isSetMessage)
 {
-#ifdef USE_ESP32
 	if (!isSetMessage) {
 		return false;
 	}
@@ -615,20 +580,10 @@ bool updateSensorStateCache(uint8_t nodeId,
 	strncpy(sensorStates[idx].type, msgType ? msgType : "", sizeof(sensorStates[idx].type) - 1);
 	sensorStates[idx].type[sizeof(sensorStates[idx].type) - 1] = '\0';
 	return true;
-#else
-	(void)nodeId;
-	(void)sensorId;
-	(void)msgType;
-	(void)payload;
-	(void)timestamp;
-	(void)isSetMessage;
-	return false;
-#endif
 }
 
 void registerPresentedSensor(uint8_t nodeId, uint8_t sensorId)
 {
-#ifdef USE_ESP32
 	if (sensorId == 255) {
 		return;
 	}
@@ -644,10 +599,6 @@ void registerPresentedSensor(uint8_t nodeId, uint8_t sensorId)
 	presentedSensors[idx].used = true;
 	presentedSensors[idx].nodeId = nodeId;
 	presentedSensors[idx].sensorId = sensorId;
-#else
-	(void)nodeId;
-	(void)sensorId;
-#endif
 }
 
 void updateHealthSnapshot(uint32_t bootCount,
@@ -680,33 +631,6 @@ const char *getNodeNameById(uint8_t nodeId)
 }
 
 
-/* 
- *	https://github.com/esp8266/Arduino/blob/master/libraries/esp8266/examples/CheckFlashConfig/CheckFlashConfig.ino
- *	https://github.com/esp8266/Arduino/blob/master/libraries/esp8266/examples/TestEspApi/TestEspApi.ino
- */ 
-const char * const FLASH_SIZE_MAP_NAMES[] = {
-    "FLASH_SIZE_4M_MAP_256_256",  /**<  Flash size : 4Mbits. Map : 256KBytes + 256KBytes */
-    "FLASH_SIZE_2M",                  /**<  Flash size : 2Mbits. Map : 256KBytes */
-    "FLASH_SIZE_8M_MAP_512_512",      /**<  Flash size : 8Mbits. Map : 512KBytes + 512KBytes */
-    "FLASH_SIZE_16M_MAP_512_512",     /**<  Flash size : 16Mbits. Map : 512KBytes + 512KBytes */
-    "FLASH_SIZE_32M_MAP_512_512",     /**<  Flash size : 32Mbits. Map : 512KBytes + 512KBytes */
-    "FLASH_SIZE_16M_MAP_1024_1024",   /**<  Flash size : 16Mbits. Map : 1024KBytes + 1024KBytes */
-    "FLASH_SIZE_32M_MAP_1024_1024",    /**<  Flash size : 32Mbits. Map : 1024KBytes + 1024KBytes */
-    "FLASH_SIZE_32M_MAP_2048_2048",    /**<  attention: don't support now ,just compatible for nodemcu;
-                                           Flash size : 32Mbits. Map : 2048KBytes + 2048KBytes */
-    "FLASH_SIZE_64M_MAP_1024_1024",     /**<  Flash size : 64Mbits. Map : 1024KBytes + 1024KBytes */
-    "FLASH_SIZE_128M_MAP_1024_1024"     /**<  Flash size : 128Mbits. Map : 1024KBytes + 1024KBytes */
-};
-const char * const RST_REASONS[] = {
-  "REASON_DEFAULT_RST",
-  "REASON_WDT_RST",
-  "REASON_EXCEPTION_RST",
-  "REASON_SOFT_WDT_RST",
-  "REASON_SOFT_RESTART",
-  "REASON_DEEP_SLEEP_AWAKE",
-  "REASON_EXT_SYS_RST"
-};
-// https://arduino-esp8266.readthedocs.io/en/latest/libraries.html#esp-specific-apis
 void send_Status(AsyncWebServerRequest *request)
 {
 	uint32_t realSize = ESP.getFlashChipSize();
@@ -716,12 +640,7 @@ void send_Status(AsyncWebServerRequest *request)
 
 	AsyncResponseStream *resp = request->beginResponseStream("text/plain");
 	resp->print ("Status\n-----------------------------\n");
-#ifdef USE_ESP32
 	resp->printf("             Chip model: ESP32\n");
-#else
-	resp->printf("        ESP Chip id: 0x%8x\n", ESP.getChipId());
-	resp->printf("      Flash real id: 0x%8x\n", ESP.getFlashChipId());
-#endif
 	resp->println();
 	resp->printf("               Heap: %d bytes\n", ESP.getFreeHeap());
 	resp->printf(" Heap Fragmentation: %d %%\n", heapFragmentation);
@@ -730,17 +649,8 @@ void send_Status(AsyncWebServerRequest *request)
 	resp->printf("    Flash ide  size: %d bytes\n", ideSize);
 	resp->printf("          CPU speed: %d MHz\n",  ESP.getCpuFreqMHz());
 	resp->printf("    Flash ide speed: %d MHz\n",  ESP.getFlashChipSpeed()/1000/1000);
-#ifndef USE_ESP32
-	FlashMode_t ideMode = ESP.getFlashChipMode();
-	resp->print ("    Flash ide  mode: " + String(ideMode == FM_QIO ? "QIO" : ideMode == FM_QOUT ? "QOUT" : ideMode == FM_DIO ? "DIO" : ideMode == FM_DOUT ? "DOUT" : "UNKNOWN") + "\n");
-	resp->printf("              Flash: %s\n", FLASH_SIZE_MAP_NAMES[system_get_flash_size_map()]);
-#endif
 	resp->println();
-#ifdef USE_ESP32
 	resp->printf("       reset reason: %d\n", static_cast<int>(esp_reset_reason()));
-#else
-	resp->printf("       reset reason: %s\n", ESP.getResetReason().c_str());
-#endif
 	resp->println();
 
 	resp->printf("          boot time: %s\n", getBootTime());
@@ -756,26 +666,12 @@ void send_Status(AsyncWebServerRequest *request)
 		resp->printf("               rssi: %d\n", WiFi.RSSI());
 	resp->println();
 
-	// https://arduino-esp8266.readthedocs.io/en/latest/filesystem.html#file-object
 	boolean fsOk = gatewayFsBegin();
 	if (fsOk) 
 	{	
 		resp->print ("Filesystem\n-----------------------------\n");
-#ifdef USE_ESP32
 		resp->printf("      FS totalBytes: %lu bytes\n", static_cast<unsigned long>(GATEWAY_FS.totalBytes()));
 		resp->printf("      FS  usedBytes: %lu bytes\n", static_cast<unsigned long>(GATEWAY_FS.usedBytes()));
-#else
-		FSInfo fs_info;
-		if (GATEWAY_FS.info(fs_info))
-		{
-			resp->printf("      FS totalBytes: %d bytes\n", fs_info.totalBytes);
-			resp->printf("      FS  usedBytes: %d bytes\n", fs_info.usedBytes);
-			resp->printf("      FS  blockSize: %d bytes\n", fs_info.blockSize);
-			resp->printf("      FS   pageSize: %d bytes\n", fs_info.pageSize);
-			resp->printf("       maxOpenFiles: %d \n", fs_info.maxOpenFiles);
-			resp->printf("      maxPathLength: %d \n", fs_info.maxPathLength);
-		}
-#endif
 		resp->println();
 
 		resp->print ("Files\n-----------------------------\n");
@@ -793,16 +689,9 @@ void send_Status(AsyncWebServerRequest *request)
 	} 
 	else
 	{
-		resp->printf("error opening LittleFS!\n");
-		dbgprintln(ico_error, "error: reading from LittleFS.");	
+		resp->printf("error opening filesystem!\n");
+		dbgprintln(ico_error, "error: reading from filesystem.");	
 	}
-	// LittleFS.end();
-
-	// resp->print ("config.json\n-----------------------------\n");
-	// File configFile = LittleFS.open("/config.json", "r");
-	// String data = configFile.readString();
-	// configFile.close();
-	// resp->printf("%s\n", data.c_str());
 
 	request->send(resp);
 }
@@ -867,11 +756,7 @@ void setup_WebServer()
 	});
 
 	server.on("/api/sensor-state", HTTP_GET, [](AsyncWebServerRequest *request){
-#ifdef USE_ESP32
 		sendSensorStateJson(request);
-#else
-		request->send(200, "application/json", "{}");
-#endif
 	});
 
 	server.on("/api/node-name", HTTP_POST, [](AsyncWebServerRequest *request){
@@ -982,7 +867,7 @@ void setup_WebServer()
 		boolean fsOk = gatewayFsBegin();
 		if (fsOk) 
 		{	
-			dbgprintln(ico_info, "LittleFS is open, start reading file ...");
+			dbgprintln(ico_info, "filesystem is open, start reading file ...");
 			File file = GATEWAY_FS.open("/bootlog.txt", "r");
 			while (file.available()) {
 				resp->printf("%s\n", file.readStringUntil('\n').c_str());
@@ -992,16 +877,15 @@ void setup_WebServer()
 		}
 		else 
 		{
-			dbgprintln(ico_error, "error: reading from LittleFS.");	
+			dbgprintln(ico_error, "error: reading from filesystem.");	
 		}
-		// LittleFS.end();
 		dbgprintln(ico_info, "reading from bootlog.txt - done.");
 		request->send(resp);
 	});
 
 	server.on("/fs", HTTP_GET, [](AsyncWebServerRequest *request){
 		if (!gatewayFsBegin()) {
-			request->send(500, "application/json", "{\"ok\":false,\"error\":\"LittleFS unavailable\"}");
+			request->send(500, "application/json", "{\"ok\":false,\"error\":\"filesystem unavailable\"}");
 			return;
 		}
 
@@ -1036,10 +920,8 @@ void setup_WebServer()
 		}
 		else 
 		{
-			dbgprintln(ico_error, "error: reading from LittleFS.");	
+			dbgprintln(ico_error, "error: reading from filesystem.");	
 		}
-
-		// LittleFS.end();
 		dbgprintln(ico_info, "done.");
 		request->send_P(200, "text/html", index_html, processor);
 	});

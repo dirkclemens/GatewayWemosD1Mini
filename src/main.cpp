@@ -1,29 +1,7 @@
 /*
-  	Wemos D1 mini, 4MB Chip
-	PLATFORM: Espressif 8266 (2.6.2) > WeMos D1 R2 and mini
-	HARDWARE: ESP8266 80MHz, 80KB RAM, 4MB Flash
-
-	PLATFORM: Espressif 8266 (2.6.2) > WeMos D1 mini Pro
-	HARDWARE: ESP8266 80MHz, 80KB RAM, 16MB Flash
-
-
-  	Firmware auslesen: 
-  	/opt/homebrew/bin/esptool.py -p /dev/cu.usbserial-1220 -b 115200 read_flash 0 0x400000 flash_contents.bin
-
-	OTA Upload
-	// python3 -m pip install --user espota
-	// /Users/dirk/.platformio/packages/framework-arduinoespressif8266/tools/espota.py
-	// /Users/dirk/Library/Arduino15/packages/esp8266/hardware/esp8266/3.1.2/tools/espota.py
-	python3 espota.py -i 192.168.2.211 -p 8266 -f .pio/build/d1_mini_ota/firmware.bin
-
-
-	bauen unbedingt mit 'platform = espressif8266@2.6.2'	
-
-	LittleFS: 
-	https://docs.platformio.org/en/latest/platforms/espressif8266.html#using-filesystem
-	https://randomnerdtutorials.com/esp8266-nodemcu-vs-code-platformio-littlefs/
- 
- */
+  GatewayESP32
+  Build/Upload ueber PlatformIO Environments in platformio.ini
+*/
 
 #include "config.h"
 #include "common.h"
@@ -33,22 +11,20 @@
 #include "platform_compat.h"
 
 // MQTT Gateway
-// https://github.com/mysensors/MySensors/blob/master/examples/GatewayESP8266MQTTClient/GatewayESP8266MQTTClient.ino
 #define WITH_MQTT
 
 // else IP-Gateway
-// https://github.com/mysensors/MySensors/blob/master/examples/GatewayESP8266/GatewayESP8266.ino
 
 //#define MAX_MESSAGE_SIZE  (32u) 
 // dic: extended debugging
 #define MY_DEBUG_VERBOSE
 
-// Use a bit lower baudrate for serial prints on ESP8266 than default in MyConfig.h
+// Baudrate fuer serielle Debug-Ausgabe
 #define MY_BAUD_RATE 9600
 
 // Enables and select radio type (if attached)
 #define MY_RADIO_RF24
-// #define RF24_PA_LEVEL RF24_PA_MAX
+#define RF24_PA_LEVEL RF24_PA_MAX
 
 #include "./../../credentials.h"
 
@@ -72,38 +48,20 @@
 	#define MY_PORT 1883
 #endif
 
-#ifdef USE_ESP32
-	#define MY_GATEWAY_ESP32
-	// Set the hostname for the WiFi Client. This is the hostname
-	// it will pass to the DHCP server if not static.
-	#define MY_HOSTNAME "GatewayESP32Wroom"
-#else
-	#define MY_GATEWAY_ESP8266
-	// Set the hostname for the WiFi Client. This is the hostname
-	// it will pass to the DHCP server if not static.
-	#define MY_HOSTNAME "GatewayWemosD1Mini"
-#endif
+#define MY_GATEWAY_ESP32
+// Set the hostname for the WiFi Client. This is the hostname
+// it will pass to the DHCP server if not static.
+#define MY_HOSTNAME "GatewayESP32Wroom"
 
 // Enable UDP communication
 // #define MY_USE_UDP
 
 
-// #define MY_ESP8266_HOSTNAME "MYSD1MiniGatewayOTA"
-
 // Enable MY_IP_ADDRESS here if you want a static ip address (no DHCP)
 // DiC: nicht definieren, sonst läuft FHEM nicht damit
 #ifndef WITH_MQTT
 	#define MY_IP_ADDRESS 192, 168, 2, 211
-#endif
-
-// If using static ip you need to define Gateway and Subnet address as well
-// #define MY_IP_GATEWAY_ADDRESS 192,168,2,23    /// IMMER DIE IP ADRESSE DES CONTROLLERS: smarthome !!!!
-// DiC: nicht definieren, sonst läuft FHEM nicht damit
-// #define MY_IP_GATEWAY_ADDRESS 192, 168, 2, 222 // (geändert 09.07.2020)  /// IMMER DIE IP ADRESSE DES CONTROLLERS: smarthome !!!!
-// #define MY_IP_SUBNET_ADDRESS 255, 255, 255, 0
-
-// The port to keep open on node server mode
-#ifndef WITH_MQTT
+	// The port to keep open on node server mode
 	#define MY_PORT 5003
 #endif
 
@@ -129,31 +87,22 @@
 
 // Flash leds on rx/tx/err
 // Led pins used if blinking feature is enabled above
-// Wemos D1 Mini Pins !!!
-// D4	 IO, 10k Pull-up, BUILTIN_LED	 GPIO2
-#ifdef USE_ESP32
-	// https://www.mysensors.org/build/connect_radio
-	// ESP32 has 3 SPI interfaces, but only one is usable for RF24, 
-	// so we have to use the default HSPI pins (GPIO 14-12-13) or 
-	// remap them to other pins using SPI.begin(SCK, MISO, MOSI, SS);
-	#define MY_RF24_CE_PIN 			17   // CE Pin
-	#define MY_RF24_CS_PIN 			 5   // CSN Pin oder 13
+// https://www.mysensors.org/build/connect_radio
+// ESP32 has 3 SPI interfaces, but only one is usable for RF24,
+// so we have to use the default HSPI pins (GPIO 14-12-13) or
+// remap them to other pins using SPI.begin(SCK, MISO, MOSI, SS);
+#define MY_RF24_CE_PIN 			17   // CE Pin
+#define MY_RF24_CS_PIN 			 5   // CSN Pin oder 13
 
-	// The IRQ pin is only required to be connected if the MY_RX_MESSAGE_BUFFER_FEATURE 
-	// is defined in the sketch. Using this feature is recommended for high traffic nodes or gateways. 
-	// Enabling it will result in better throughput but will require some additional memory to keep the message in memory before processing.	
-	//#define MY_RX_MESSAGE_BUFFER_FEATURE
+// The IRQ pin is only required to be connected if the MY_RX_MESSAGE_BUFFER_FEATURE
+// is defined in the sketch. Using this feature is recommended for high traffic nodes or gateways.
+// Enabling it will result in better throughput but will require some additional memory to keep the message in memory before processing.
+//#define MY_RX_MESSAGE_BUFFER_FEATURE
 
-	#define MY_DEFAULT_ERR_LED_PIN 	32	// red
-	#define MY_DEFAULT_RX_LED_PIN 	33	// green
-	#define MY_DEFAULT_TX_LED_PIN 	27	// yellow
-	#define WITH_LEDS_BLINKING
-#else
-	#define MY_DEFAULT_ERR_LED_PIN 	D1
-	#define MY_DEFAULT_RX_LED_PIN 	D0
-	#define MY_DEFAULT_TX_LED_PIN 	D3
-	#define MY_WITH_LEDS_BLINKING_INVERSE	// bei externen LEDs
-#endif
+#define MY_DEFAULT_ERR_LED_PIN 	32	// red
+#define MY_DEFAULT_RX_LED_PIN 	33	// green
+#define MY_DEFAULT_TX_LED_PIN 	27	// yellow
+#define WITH_LEDS_BLINKING
 
 
 #ifdef WITH_WEB_DEBUG
@@ -437,17 +386,6 @@ struct ArcStats_t {
     unsigned success;   ///< success rate in percent
 } arcStats;
 
-// https://github.com/esp8266/Arduino/blob/master/tools/sdk/include/user_interface.h
-const char* reset_reasons_esp8266[] = {
-	"0: power on",
-	"1: hardware watch dog",
-	"2: exception reset",
-	"3: software watch dog",
-	"4: software restart",
-	"5: wake up from deep-sleep",
-	"6: external system reset"
-};
-
 const char* reset_reasons_esp32[] = {
 	"0: none",
 	"1: Vbat power on reset",
@@ -470,23 +408,13 @@ const char* reset_reasons_esp32[] = {
 
 static uint8_t getResetReasonCode()
 {
-#ifdef USE_ESP32
 	return static_cast<uint8_t>(esp_reset_reason());
-#else
-	const rst_info *ri = ESP.getResetInfoPtr();
-	return ri ? static_cast<uint8_t>(ri->reason) : 0;
-#endif
 }
 
 static const char *getResetReasonText(uint8_t reasonCode)
 {
-#ifdef USE_ESP32
 	const uint8_t count = sizeof(reset_reasons_esp32) / sizeof(reset_reasons_esp32[0]);
 	return (reasonCode < count) ? reset_reasons_esp32[reasonCode] : "unknown";
-#else
-	const uint8_t count = sizeof(reset_reasons_esp8266) / sizeof(reset_reasons_esp8266[0]);
-	return (reasonCode < count) ? reset_reasons_esp8266[reasonCode] : "unknown";
-#endif
 }
 //---------------------------------------------------------------------
 #pragma endregion
@@ -661,18 +589,7 @@ static void removeFileIfExists(const char *path)
 
 static void captureResetReasonRaw()
 {
-#ifdef USE_ESP32
 	snprintf(gResetReasonRaw, sizeof(gResetReasonRaw), "esp_reset_reason=%u", static_cast<unsigned>(esp_reset_reason()));
-#else
-	String raw = ESP.getResetInfo();
-	raw.replace("\r", " ");
-	raw.replace("\n", " ");
-	raw.trim();
-	if (raw.length() == 0) {
-		raw = "n/a";
-	}
-	snprintf(gResetReasonRaw, sizeof(gResetReasonRaw), "%s", raw.c_str());
-#endif
 	gResetReasonRaw[sizeof(gResetReasonRaw) - 1] = '\0';
 }
 
@@ -728,7 +645,7 @@ void logBootTime(bool ntpOk)
 		File file = GATEWAY_FS.open("/bootlog.txt", "a");
 		if (!file || file.isDirectory())
 		{
-			dbgprintln(ico_error, "Error: Unable to open boot log in LittleFS");
+			dbgprintln(ico_error, "Error: Unable to open boot log in filesystem");
 		}
 		else
 		{
@@ -765,7 +682,7 @@ void logBootTime(bool ntpOk)
 	}
 	else
 	{
-		dbgprintln(ico_error, "error opening LittleFS!");
+		dbgprintln(ico_error, "error opening filesystem!");
 	}
 }
 //---------------------------------------------------------------------
@@ -783,8 +700,7 @@ void setup_OTA()
 
 	ArduinoOTA.onStart([]() {
 		gOtaUpdateInProgress = true;
-		// Clean LittleFS
-		// https://arduino-esp8266.readthedocs.io/en/latest/filesystem.html#end
+		// Unmount filesystem waehrend OTA
 		GATEWAY_FS.end();
 		dbgprintln(ico_info, "Start");
 		send_Event("[OTA] Start", "debug");
@@ -979,7 +895,6 @@ void updateWebStats()
 	formatBytes(ESP.getSketchSize(),        sketchBuf,    sizeof(sketchBuf));
 	formatBytes(ESP.getFreeSketchSpace(),   freeSketchBuf, sizeof(freeSketchBuf));
 
-	// https://arduino-esp8266.readthedocs.io/en/latest/libraries.html#esp-specific-apis
 	static char page[3072];
 	page[0] = '\0';
 	char *p = page;
@@ -1206,11 +1121,6 @@ static bool wifiStackRecoveryDone = false;
 static unsigned long lastIndicatorMs = 0;
 static int lastIndicatorCode = -1;
 
-#ifndef USE_ESP32
-WiFiEventHandler wifiDisconnectHandler;
-WiFiEventHandler wifiGotIpHandler;
-#endif
-
 static const unsigned long WIFI_BEGIN_INTERVAL_MS = 15000UL;          // retry WiFi.begin every 15s
 static const unsigned long WIFI_STACK_RECOVERY_MS = 1000UL * 60UL * 5UL; // hard WiFi reset after 5 minutes disconnected
 static const unsigned long WIFI_RECONNECT_TIMEOUT_MS = 1000UL * 60UL * 10UL; // evaluate every 10 minutes
@@ -1229,10 +1139,8 @@ static const char * const NTP_ALT_SERVERS[] = {
 
 static void applyTimeZone()
 {
-#ifdef USE_ESP32
 	setenv("TZ", TZ_INFO, 1);
 	tzset();
-#endif
 }
 
 static void requestNtpSync(bool force = false)
@@ -1261,11 +1169,7 @@ static void requestNtpSync(bool force = false)
 		s3 = NTP_ALT_SERVERS[k];
 	}
 
-#ifdef USE_ESP32
 	configTzTime(TZ_INFO, s1, s2, s3);
-#else
-	configTime(TZ_INFO, s1, s2, s3);
-#endif
 	dbgprintf(ico_info, "[NTP] sync requested (%s, %s, %s)", s1, s2, s3);
 	ntpServerSetIndex = static_cast<uint8_t>((ntpServerSetIndex + 1) % (altCount + 1));
 #else
@@ -1344,7 +1248,6 @@ void logWifiStatus(const char *reason)
 
 void setupWifiEventLogging()
 {
-#ifdef USE_ESP32
 	WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
 		if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
 			dbgprintf(ico_error,
@@ -1364,30 +1267,6 @@ void setupWifiEventLogging()
 			requestNtpSync(true);
 		}
 	});
-#else
-	wifiDisconnectHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected &event) {
-		dbgprintf(ico_error,
-				  "[WiFiEvt] disconnected | reason=%u (%s) | ssid=%s | status=%s (%d) | RSSI=%d",
-				  event.reason,
-				  wifiDisconnectReasonToString(event.reason),
-				  event.ssid.c_str(),
-				  wifiStatusToString(WiFi.status()),
-				  static_cast<int>(WiFi.status()),
-				  WiFi.RSSI());
-	});
-
-	wifiGotIpHandler = WiFi.onStationModeGotIP([](const WiFiEventStationModeGotIP &event) {
-		dbgprintf(ico_ok,
-				  "[WiFiEvt] got-ip | ip=%s | gw=%s | mask=%s | status=%s (%d) | RSSI=%d",
-				  event.ip.toString().c_str(),
-				  event.gw.toString().c_str(),
-				  event.mask.toString().c_str(),
-				  wifiStatusToString(WiFi.status()),
-				  static_cast<int>(WiFi.status()),
-				  WiFi.RSSI());
-		requestNtpSync(true);
-	});
-#endif
 }
 
 void loop_Wifi()
@@ -1539,23 +1418,13 @@ void pushover(const char *message, const char *title = "MySensors Gateway")
 {
 	WiFiClientSecure client;
 	HTTPClient http;
-#ifndef USE_ESP32
 	client.setInsecure();
-#endif
 	Serial.println("Pushover: connecting ...");
 	if (!client.connect("api.pushover.net", 443))
 	{
 		char err_buf[100];
-#ifndef USE_ESP32
-		if (client.getLastSSLError(err_buf, 100) < 0)
-		{
-			Serial.printf_P(PSTR("Pushover: connection failed: %s\n"), err_buf);
-		}
-		else
-#endif
-		{
-			Serial.printf_P(PSTR("Pushover: connection failed. Could not connect to api.pushover.net:443.\n"));
-		}
+		(void)err_buf;
+		Serial.printf_P(PSTR("Pushover: connection failed. Could not connect to api.pushover.net:443.\n"));
 	}
 
 	// +"&device="+_device
@@ -1906,9 +1775,6 @@ void setup()
 	
 	Serial.printf("Reset reason code: %u\n", static_cast<unsigned>(gResetReasonCode));
 	Serial.printf("Reset reason text: %s\n", getResetReasonText(gResetReasonCode));
-#ifndef USE_ESP32
-	Serial.printf("Reset info: %s\n", ESP.getResetInfo().c_str());
-#endif
 #endif
 
 	cpuLastMicros = micros();

@@ -4,8 +4,8 @@
  *
  * Isolated in its own translation unit to avoid the enum name clash between
  * lwip's tcp_state (ESTABLISHED, TIME_WAIT …) and the identically-named
- * members in ESP8266WiFi's wl_definitions.h.  This file must NOT include
- * <ESP8266WiFi.h> or any header that pulls it in.
+ * members in WiFi stack headers. This file must NOT include WiFi headers
+ * or any header that pulls them in.
  */
 
 extern "C" {
