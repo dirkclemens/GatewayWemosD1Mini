@@ -23,7 +23,7 @@ Die Web-Oberfläche ist über `http://<gateway-ip>/` erreichbar und enthält fü
 | **📨 Messages** | Live-Tabelle der letzten 30 MySensors-Nachrichten (Zeit, Node, Sensor, Cmd, Typ, Payload) |
 | **📊 Sensors** | Pro-Node-Karten mit dem letzten empfangenen Wert (`C_SET`) je Sensor inkl. Zeitstempel — Daten leben im Browser-Cache, kein ESP-RAM |
 | **ℹ️ Info** | Gateway-Statistiken (Heap, RSSI, Rx/Tx-Zähler) + Aktionen: Reboot, Reconnect, Bootlog, Log löschen |
-| **🏷️ Nodes** | Node-Namen vergeben und verwalten (persistent auf dem Gateway gespeichert) |
+| **⚙️ Settings** | Laufzeit-Einstellungen (Intervall, Debug, Live-Updates, Telnet, OTA-Fenster) und Node-Namen-Verwaltung |
 | **🔧 Debug** | Telemetrie-Badges, Heap/Frag-Chart, Log-Level-Filter, Debug- und Indicator-Log, LED-Status |
 
 ### Screenshots
@@ -37,8 +37,8 @@ Die Web-Oberfläche ist über `http://<gateway-ip>/` erreichbar und enthält fü
 #### ℹ️ Info
 ![Info Tab](screenshots/info.png)
 
-#### 🏷️ Nodes
-![Nodes Tab](screenshots/nodes.png)
+#### ⚙️ Settings
+![Settings Tab](screenshots/nodes.png)
 
 #### 🔧 Debug
 ![Debug Tab](screenshots/debug.png)
@@ -78,6 +78,13 @@ pio run -t upload                # seriell flashen
 pio run -e d1_mini_ota -t upload # OTA flashen
 ```
 
+ESP32 (serielle Umgebung):
+
+```bash
+pio run -e esp32_devkitc_serial
+pio run -e esp32_devkitc_serial -t upload
+```
+
 **OTA manuell:**
 
 ```bash
@@ -109,7 +116,24 @@ Der Gateway stellt einen schlanken JSON-Endpoint bereit:
 GET /healthz
 ```
 
-Beispiel-Felder: `boot_count`, `last_boot_epoch`, `reset_reason_code`, `uptime_s`, `heap`, `rssi`, `wifi_connected`, `sse_clients`.
+Beispiel-Felder: `boot_count`, `last_boot_epoch`, `reset_reason_code`, `reset_reason`, `reset_reason_raw`, `planned_restart_marker`, `uptime_s`, `heap`, `rssi`, `wifi_connected`, `sse_clients`.
+
+### Reboot-Diagnose und Stabilität
+
+- Persistenter Boot-Zähler in `/boot_count.txt`
+- Letzter Boot-Epoch in `/last_boot_epoch.txt`
+- Geplanter Restart-Marker in `/last_restart_marker.txt` (wird beim nächsten Boot gelesen und anschließend gelöscht)
+- Erweiterte Bootlog-Zeilen in `/bootlog.txt` mit:
+  - `rst` (Reset-Text)
+  - `rst_raw` (Roh-Reset-Info)
+  - `planned` (z. B. `wifi-stack-recovery`, `wifi-reconnect-timeout-post-stage1`, `web-ui-reboot`)
+
+WLAN-Recovery ist zweistufig umgesetzt:
+
+1. Nach 5 Minuten ohne WLAN: harter WiFi-Stack-Reset (`WiFi.disconnect`, OFF/STA, neues `WiFi.begin`).
+2. Falls weiterhin offline: Reboot nach dem nächsten Timeout-Fenster (derzeit 10 Minuten).
+
+Damit sind ungeplante Abstürze besser von absichtlich ausgelösten Neustarts unterscheidbar.
 
 ### Dateizugriff auf LittleFS
 

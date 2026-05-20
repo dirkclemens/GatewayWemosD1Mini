@@ -10,6 +10,7 @@
 #define OTA
 #define WWW
 #define WWW_PORT            80
+#define WITH_WEB_DEBUG
 #define TELNET
 #define TELNET_PORT         23
 #define NTP

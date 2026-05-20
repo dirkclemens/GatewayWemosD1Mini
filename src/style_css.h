@@ -158,7 +158,11 @@ main { padding-top: calc(var(--nav-h) + 10px); }
     align-items: center;
 }
 #page-info.active { display: flex; }
-#page-info #infoContent,
+#page-info #infoContent {
+    width: 100%;
+    text-align: left;
+    justify-content: left;
+}
 #page-info #gwClientsContent {
     width: 100%;
     text-align: center;
@@ -240,6 +244,16 @@ input[type=text] {
 }
 input[type=text]:focus { outline: 2px solid var(--primary); border-color: var(--primary); }
 .form-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+
+.settings-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+}
+.settings-stack label {
+    display: block;
+}
 
 /* ── Node names table ────────────────────────────────────────────────── */
 .nodes-table {

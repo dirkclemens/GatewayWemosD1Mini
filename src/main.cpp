@@ -25,6 +25,22 @@
  
  */
 
+// MySensors-Defines (müssen VOR MySensors.h stehen)
+#define MY_DEBUG_VERBOSE
+#define MY_BAUD_RATE 9600
+#define MY_RADIO_RF24
+#define WITH_MQTT
+
+#include <MySensors.h>
+
+// Undef MySensors max/min Makros, um STL-Konflikte zu vermeiden
+#undef max
+#undef min
+
+#include <ArduinoOTA.h>
+#include "WebServer.h"
+
+// Standard-Includes
 #include "config.h"
 #include "common.h"
 #include "uptime.h"
@@ -32,207 +48,535 @@
 #include "diagnostics_ui.h"
 #include "platform_compat.h"
 
-// MQTT Gateway
-// https://github.com/mysensors/MySensors/blob/master/examples/GatewayESP8266MQTTClient/GatewayESP8266MQTTClient.ino
-#define WITH_MQTT
+// --- Globale Defines und Variablen (aus alter main.cpp) ---
+#define CHILD_ID_GENERAL 0
+#define CHILD_ID_UPTIME 197
+#define OTA_HANDLE_INTERVAL_MS 500
+#define LAST_BOOT_EPOCH_FILE "/boot_epoch.txt"
+#define LAST_RESTART_MARKER_FILE "/restart_marker.txt"
+#define BOOT_COUNT_FILE "/boot_count.txt"
+#define OTA_WINDOW_MS 300000UL  // 5 minutes
 
-// else IP-Gateway
-// https://github.com/mysensors/MySensors/blob/master/examples/GatewayESP8266/GatewayESP8266.ino
-
-//#define MAX_MESSAGE_SIZE  (32u) 
-// dic: extended debugging
-#define MY_DEBUG_VERBOSE
-
-// Use a bit lower baudrate for serial prints on ESP8266 than default in MyConfig.h
-#define MY_BAUD_RATE 9600
-
-// Enables and select radio type (if attached)
-#define MY_RADIO_RF24
-// #define RF24_PA_LEVEL RF24_PA_MAX
-
-#include "./../../credentials.h"
-
-//=====================================================================
-#pragma region configuration
-
-#ifdef WITH_MQTT
-	#define MY_GATEWAY_MQTT_CLIENT
-	// Set this node's subscribe and publish topic prefix
-	#define MY_MQTT_PUBLISH_TOPIC_PREFIX "mygateway1-out"
-	#define MY_MQTT_SUBSCRIBE_TOPIC_PREFIX "mygateway1-in"
-	// Set MQTT client id
-	#define MY_MQTT_CLIENT_ID "mysensors-1"
-	// Enable these if your MQTT broker requires usenrame/password
-	// #define MY_MQTT_USER "***"
-	// #define MY_MQTT_PASSWORD "***"
-	// MQTT broker ip address or url. Define one or the other.
-	//#define MY_CONTROLLER_URL_ADDRESS "m20.cloudmqtt.com"
-	#define MY_CONTROLLER_IP_ADDRESS 192, 168, 2, 222
-	// The MQTT broker port to to open
-	#define MY_PORT 1883
-#endif
-
-#ifdef USE_ESP32
-	#define MY_GATEWAY_ESP32
-	// Set the hostname for the WiFi Client. This is the hostname
-	// it will pass to the DHCP server if not static.
-	#define MY_HOSTNAME "GatewayESP32Wroom"
-#else
-	#define MY_GATEWAY_ESP8266
-	// Set the hostname for the WiFi Client. This is the hostname
-	// it will pass to the DHCP server if not static.
-	#define MY_HOSTNAME "GatewayWemosD1Mini"
-#endif
-
-// Enable UDP communication
-// #define MY_USE_UDP
-
-
-// #define MY_ESP8266_HOSTNAME "MYSD1MiniGatewayOTA"
-
-// Enable MY_IP_ADDRESS here if you want a static ip address (no DHCP)
-// DiC: nicht definieren, sonst läuft FHEM nicht damit
-#ifndef WITH_MQTT
-	#define MY_IP_ADDRESS 192, 168, 2, 211
-#endif
-
-// If using static ip you need to define Gateway and Subnet address as well
-// #define MY_IP_GATEWAY_ADDRESS 192,168,2,23    /// IMMER DIE IP ADRESSE DES CONTROLLERS: smarthome !!!!
-// DiC: nicht definieren, sonst läuft FHEM nicht damit
-// #define MY_IP_GATEWAY_ADDRESS 192, 168, 2, 222 // (geändert 09.07.2020)  /// IMMER DIE IP ADRESSE DES CONTROLLERS: smarthome !!!!
-// #define MY_IP_SUBNET_ADDRESS 255, 255, 255, 0
-
-// The port to keep open on node server mode
-#ifndef WITH_MQTT
-	#define MY_PORT 5003
-#endif
-
-// How many clients should be able to connect to this gateway (default 1)
-// https://forum.mysensors.org/topic/2712/my_gateway_max_clients
-#define MY_GATEWAY_MAX_CLIENTS 4 // allow HA + fallback client as before
-
-// Controller ip address. Enables client mode (default is "server" mode).
-// Also enable this if MY_USE_UDP is used and you want sensor data sent somewhere.
-// #define MY_CONTROLLER_IP_ADDRESS 192, 168, 2, 222
-
-// Enable inclusion mode
-#define MY_INCLUSION_MODE_FEATURE
-// Enable Inclusion mode button on gateway
-#define MY_INCLUSION_BUTTON_FEATURE
-// Set inclusion mode duration (in seconds)
-#define MY_INCLUSION_MODE_DURATION 60
-// Digital pin used for inclusion mode button
-//#define MY_INCLUSION_MODE_BUTTON_PIN   4 // D1 to GND alt: 3 // (GIPO2 D4)
-
-// Set blinking period
-#define MY_DEFAULT_LED_BLINK_PERIOD 300
-
-// Flash leds on rx/tx/err
-// Led pins used if blinking feature is enabled above
-// Wemos D1 Mini Pins !!!
-// D4	 IO, 10k Pull-up, BUILTIN_LED	 GPIO2
-#ifdef USE_ESP32
-	// https://www.mysensors.org/build/connect_radio
-	// ESP32 has 3 SPI interfaces, but only one is usable for RF24, 
-	// so we have to use the default HSPI pins (GPIO 14-12-13) or 
-	// remap them to other pins using SPI.begin(SCK, MISO, MOSI, SS);
-	#define MY_RF24_CE_PIN 			17   // CE Pin
-	#define MY_RF24_CS_PIN 			 5   // CSN Pin oder 13
-
-	// The IRQ pin is only required to be connected if the MY_RX_MESSAGE_BUFFER_FEATURE 
-	// is defined in the sketch. Using this feature is recommended for high traffic nodes or gateways. 
-	// Enabling it will result in better throughput but will require some additional memory to keep the message in memory before processing.	
-	//#define MY_RX_MESSAGE_BUFFER_FEATURE
-
-	#define MY_DEFAULT_ERR_LED_PIN 	32	// red
-	#define MY_DEFAULT_RX_LED_PIN 	33	// green
-	#define MY_DEFAULT_TX_LED_PIN 	27	// yellow
-	#define WITH_LEDS_BLINKING
-#else
-	#define MY_DEFAULT_ERR_LED_PIN 	D1
-	#define MY_DEFAULT_RX_LED_PIN 	D0
-	#define MY_DEFAULT_TX_LED_PIN 	D3
-	#define MY_WITH_LEDS_BLINKING_INVERSE	// bei externen LEDs
-#endif
-
-
-#define MY_INDICATION_HANDLER
-#define MY_SPLASH_SCREEN_DISABLED
+boolean alertSent = false;
+static unsigned long interval = 1000; // every second
+static unsigned long prev_time;
+static unsigned long gw_send_interval = 1000 * 60 * 15; // every 15 min
+static unsigned long gw_send_prev_time;
+unsigned long cpuLastMicros = 0; // cpu utilisation
+unsigned long avgCpuDelta = 0;   // cpu utilisation
 
 unsigned long gatewayTxMessage = 0;
 unsigned long gatewayRxMessage = 0;
 unsigned long sensorTxMessage = 0;
 unsigned long sensorRxMessage = 0;
 unsigned long indicatorTxErrors = 0;
-uint32_t bootCount = 0;
+
 uint32_t lastBootEpoch = 0;
 bool bootTimeSynced = false;
-static uint8_t gResetReasonCode = 0;
+bool bootLogSyncedWritten = false;
 
-static const char *BOOT_COUNT_FILE = "/boot_count.txt";
-static const char *LAST_BOOT_EPOCH_FILE = "/last_boot_epoch.txt";
-static bool bootLogSyncedWritten = false;
+char gResetReasonRaw[64] = {0};
+char gLastRestartMarker[64] = {0};
+uint32_t gResetReasonCode = 0;
+uint32_t bootCount = 0;
 
+unsigned long gLastOtaHandleMs = 0;
+bool gOtaUpdateInProgress = false;
+bool gOtaRuntimeEnabled = false;
+unsigned long gOtaWindowUntilMs = 0;
 
-// #ifdef MY_USE_UDP
-// #include <WiFiUdp.h>
-// #endif
+int lastIndicatorCode = 0;
+unsigned long lastIndicatorMs = 0;
 
-#ifdef WWW
-#include "WebServer.h"
-#endif // WWW
-
-#ifdef OTA
-#include <ArduinoOTA.h> // neu seit 2.2
-#endif
-
-#ifdef PUSHOVER
-#include <WiFiClientSecure.h>
-#endif // PUSHOVER
-boolean alertSent = false;
-
-////////////////////////////////////////////////////////////////////////
-// Child declarations
-// wichtig für fhem https://fhem.de/commandref.html#MYSENSORS_DEVICE
-// https://tecdox.adcore.de/edit/wiki/iot/mysensors-sensoren
-#define CHILD_ID_GENERAL 0
-#define CHILD_ID_UPTIME 197
-
-////////////////////////////////////////////////////////////////////////
-// includes
-#include <MySensors.h>
-
-/** serial or telnet output **/
-#ifdef TELNET
-WiFiServer telnetServer(TELNET_PORT);
+WiFiServer telnetServer(23);
 WiFiClient telnetClient;
-#endif
+bool gTelnetRuntimeEnabled = false;
 
-// 	interval for updating events / web ui
-static unsigned long interval = 1000; // every second
-static unsigned long prev_time;
-
-// 	interval for sending messages to server
-static unsigned long gw_send_interval = 1000 * 60 * 15; // every 15 min
-static unsigned long gw_send_prev_time;
-
-unsigned long cpuLastMicros = 0; // cpu utilisation
-unsigned long avgCpuDelta = 0;	 // cpu utilisation
-
-//---------------------------------------------------------------------
-#pragma endregion
-
-// /////// /////////////////////////////////////////////////////////////////////
-// Initialize message types
-// https://www.mysensors.org/download/serial_api_20#variable-types
-// https://github.com/mysensors/MySensors/blob/development/core/MyMessage.h
+// Nachrichtenobjekte
 MyMessage msgGeneral(CHILD_ID_GENERAL, V_VAR1);
 MyMessage msgUptime(CHILD_ID_UPTIME, V_TEXT);
-
-// ARC (Automatic Retries Count) message
-#define SENSOR_ID_ARC		98
-#define V_TYPE_ARC			V_VAR5
+#define SENSOR_ID_ARC 98
+#define V_TYPE_ARC V_VAR5
 MyMessage arcMessage(SENSOR_ID_ARC, V_TYPE_ARC);
+
+// === Struktur und Funktionsprototypen ===
+
+// Funktionen, die später in dieser Datei definiert sind
+const char* reportArcStatistics();
+unsigned long getCpuDelta();
+void loop_Wifi();
+void loop_Telnet();
+void loop_NTP();
+static bool isTimeSane();
+bool writeUint32File(const char* filename, uint32_t value);
+bool readTextFile(const char* filename, char* buffer, size_t buflen);
+void logBootTime(bool synced);
+const char* getResetReasonText(uint32_t code);
+const char* wifiStatusToString(wl_status_t status);
+void updateWebStats();
+// Hinweis: requestNtpSync(bool force) ist static - Funktion wird später definiert
+// pushover ist auch nicht deklariert hier - wird später definiert
+// sendExternalHeartbeat wird später definiert
+
+#ifdef USE_ESP32
+//=======================
+// --- Dual-Core Task-Architektur für ESP32 ---
+//=======================
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
+// --- Aufteilung nach Standard: ---
+// Task 1: MySensors-Processing (Empfang, Senden, Heartbeat, ARC-Statistik)
+// Task 2: Webserver, OTA, NTP, WiFi, Telemetrie, Health, Debug, UI
+
+void taskMySensors(void *pvParameters) {
+	for (;;) {
+		// Heartbeat und Uptime senden (wie in loop, gw_send_interval)
+		static unsigned long lastSendMs = 0;
+		if (millis() - lastSendMs > gw_send_interval) {
+			lastSendMs = millis();
+			sendHeartbeat();
+			send(msgUptime.set(uptime()));
+			// ARC-Statistik
+			#ifdef WWW
+			if (isWebDebugEnabled()) {
+				const char* arc = reportArcStatistics();
+				send_Event(arc, "debug");
+			}
+			#endif
+		}
+		// Hier ggf. receive() und weitere MySensors-Logik (z.B. indication)
+		// receive() wird von MySensors-Framework aufgerufen, daher hier keine Endlosschleife nötig
+		vTaskDelay(100 / portTICK_PERIOD_MS); // 100ms-Takt für Heartbeat
+	}
+}
+
+void taskWebServer(void *pvParameters) {
+	for (;;) {
+		// Webserver, OTA, NTP, WiFi, Telemetrie, Health, Debug, UI
+		avgCpuDelta = getCpuDelta();
+#ifdef WWW
+		const bool webDebugOn = isWebDebugEnabled();
+		const bool webLiveUiOn = isWebLiveUiEnabled();
+#else
+		const bool webDebugOn = false;
+		const bool webLiveUiOn = false;
+#endif
+
+		delay(10);
+		yield();
+
+		if (WiFi.status() != WL_CONNECTED) {
+			loop_Wifi();
+		}
+#ifdef WWW
+		loop_WebServer();
+#endif
+#ifdef TELNET
+		if (isTelnetRuntimeEnabled()) {
+			loop_Telnet();
+		}
+#endif
+#ifdef NTP
+		loop_NTP();
+		if (!bootTimeSynced) {
+			requestNtpSync();
+		}
+#endif
+#ifdef WWW
+#ifdef WITH_MQTT
+		{
+			static unsigned long lastCtrlStatusProbeMs = 0;
+			static unsigned long lastCtrlStatusSendMs = 0;
+			static bool ctrlStatusInitialized = false;
+			static bool lastCtrlStatus = false;
+			const unsigned long nowMs = millis();
+			if ((nowMs - lastCtrlStatusProbeMs) >= 5000UL) {
+				lastCtrlStatusProbeMs = nowMs;
+				const bool controllerUpNow = isTransportReady();
+				if (!ctrlStatusInitialized ||
+					controllerUpNow != lastCtrlStatus ||
+					(nowMs - lastCtrlStatusSendMs) >= 30000UL) {
+					lastCtrlStatus = controllerUpNow;
+					ctrlStatusInitialized = true;
+					lastCtrlStatusSendMs = nowMs;
+					send_Event(controllerUpNow ? "1" : "0", "ctrlstatus");
+				}
+			}
+		}
+#endif
+#endif
+#ifdef OTA
+		if (isOtaRuntimeEnabled() && WiFi.status() == WL_CONNECTED) {
+			const unsigned long nowMs = millis();
+			if (!gOtaUpdateInProgress &&
+				gOtaWindowUntilMs != 0 &&
+				static_cast<long>(nowMs - gOtaWindowUntilMs) >= 0L) {
+				gOtaRuntimeEnabled = false;
+				gOtaWindowUntilMs = 0;
+				dbgprintln(ico_info, "[OTA] runtime window expired");
+			}
+			if (isOtaRuntimeEnabled() && (nowMs - gLastOtaHandleMs) >= OTA_HANDLE_INTERVAL_MS) {
+				gLastOtaHandleMs = nowMs;
+				ArduinoOTA.handle();
+			}
+		}
+#endif
+		if (!bootTimeSynced && isTimeSane()) {
+			bootTimeSynced = true;
+			lastBootEpoch = static_cast<uint32_t>(time(nullptr));
+			writeUint32File(LAST_BOOT_EPOCH_FILE, lastBootEpoch);
+			setBootTime();
+			if (!bootLogSyncedWritten) {
+				logBootTime(true);
+				bootLogSyncedWritten = true;
+			}
+			dbgprintf(ico_ok, "time synchronized, boot epoch: %lu", static_cast<unsigned long>(lastBootEpoch));
+		}
+#ifdef EXTERNAL_HEARTBEAT_URL
+		sendExternalHeartbeat();
+#endif
+		// Health/Debug/Telemetry/UI
+		if (millis() - prev_time > interval) {
+			prev_time = millis();
+			yield();
+#ifdef WWW
+			updateHealthSnapshot(bootCount,
+								 lastBootEpoch,
+								 gResetReasonCode,
+								 getResetReasonText(gResetReasonCode),
+								 gResetReasonRaw,
+								 gLastRestartMarker,
+								 bootTimeSynced);
+#endif
+			char timestamp[22];
+			getCurrentTimeString(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S");
+			uint32_t heap = ESP.getFreeHeap();
+			if ((alertSent == false) && (heap < 10.0)) {
+				pushover("Heap size < 10Kb !!!");
+				alertSent = true;
+			} else {
+				alertSent = false;
+			}
+			if (webDebugOn) {
+				char heapFmt[12];
+				formatBytes(heap, heapFmt, sizeof(heapFmt));
+				char buf[128];
+				if (snprintf(buf, sizeof(buf),
+							 "%s | %s | cycle: %lu &mu;s | heap: %s | fragm: %u%% | blocks: %u<br />",
+							 timestamp,
+							 runtime(),
+							 getCpuDelta(),
+							 heapFmt,
+							 getHeapFragmentationPct(),
+							 getMaxFreeBlockBytes()) < 0) {
+					strcpy(buf, "<div class=\"error\">error</div>");
+				}
+				send_Event(buf, "debug");
+				buf[0] = {'\0'};
+			}
+			timestamp[0] = {'\0'};
+			const bool controllerUp = isTransportReady();
+#ifdef WITH_MQTT
+			const char *controllerType = "mqtt";
+#else
+			const char *controllerType = "gateway";
+#endif
+			if (webDebugOn) {
+				char telem[320];
+				buildTelemetryJson(telem, sizeof(telem),
+					heap,
+					getHeapFragmentationPct(),
+					getMaxFreeBlockBytes(),
+					WiFi.RSSI(),
+					wifiStatusToString(WiFi.status()),
+					lastIndicatorCode,
+					gatewayRxMessage,
+					gatewayTxMessage,
+					sensorRxMessage,
+					sensorTxMessage,
+					indicatorTxErrors,
+					controllerUp,
+					controllerType);
+				send_Event(telem, "telemetry");
+			}
+			static unsigned long lastControllerDiagMs = 0;
+			if (millis() - lastControllerDiagMs > 60000UL) {
+				lastControllerDiagMs = millis();
+				dbgprintf(ico_info,
+						  "[CTRL-DIAG] WiFi=%s(%d) RSSI=%d SSID=%s IP=%s heap=%lu frag=%u maxblk=%u lastInd=%d (%lums ago)",
+						  wifiStatusToString(WiFi.status()),
+						  static_cast<int>(WiFi.status()),
+						  WiFi.RSSI(),
+						  WiFi.SSID().c_str(),
+						  WiFi.localIP().toString().c_str(),
+						  ESP.getFreeHeap(),
+						  getHeapFragmentationPct(),
+						  getMaxFreeBlockBytes(),
+						  lastIndicatorCode,
+						  (lastIndicatorMs == 0 ? 0UL : millis() - lastIndicatorMs));
+			}
+			static unsigned long lastInfoSendMs = 0;
+			if (webLiveUiOn && millis() - lastInfoSendMs >= 5000UL) {
+				lastInfoSendMs = millis();
+				updateWebStats();
+			}
+		}
+		vTaskDelay(10 / portTICK_PERIOD_MS);
+	}
+}
+
+void startDualCoreTasks() {
+	xTaskCreatePinnedToCore(taskMySensors, "MySensorsTask", 8192, NULL, 1, NULL, 1); // Core 1
+	xTaskCreatePinnedToCore(taskWebServer, "WebServerTask", 8192, NULL, 1, NULL, 0); // Core 0
+}
+#else
+// --- Klassische loop() für ESP8266 ---
+void loop()
+{
+	avgCpuDelta = getCpuDelta();
+#ifdef WWW
+	const bool webDebugOn = isWebDebugEnabled();
+	const bool webLiveUiOn = isWebLiveUiEnabled();
+#else
+	const bool webDebugOn = false;
+	const bool webLiveUiOn = false;
+#endif
+
+	delay(10); // https://github.com/espressif/esp-idf/issues/1021
+	yield();
+
+	if (WiFi.status() != WL_CONNECTED)
+	{
+		loop_Wifi();
+	}
+
+#ifdef WWW
+	loop_WebServer();
+#endif // WWW
+
+#ifdef TELNET
+	if (isTelnetRuntimeEnabled()) {
+		loop_Telnet(); // handle telnet server
+	}
+#endif
+
+#ifdef NTP
+	loop_NTP();
+	if (!bootTimeSynced) {
+		requestNtpSync();
+	}
+#endif // NTP
+
+#ifdef WWW
+#ifdef WITH_MQTT
+	{
+		static unsigned long lastCtrlStatusProbeMs = 0;
+		static unsigned long lastCtrlStatusSendMs = 0;
+		static bool ctrlStatusInitialized = false;
+		static bool lastCtrlStatus = false;
+		const unsigned long nowMs = millis();
+		if ((nowMs - lastCtrlStatusProbeMs) >= 5000UL) {
+			lastCtrlStatusProbeMs = nowMs;
+			const bool controllerUpNow = isTransportReady();
+			if (!ctrlStatusInitialized ||
+				controllerUpNow != lastCtrlStatus ||
+				(nowMs - lastCtrlStatusSendMs) >= 30000UL) {
+				lastCtrlStatus = controllerUpNow;
+				ctrlStatusInitialized = true;
+				lastCtrlStatusSendMs = nowMs;
+				send_Event(controllerUpNow ? "1" : "0", "ctrlstatus");
+			}
+		}
+	}
+#endif
+#endif
+
+#ifdef OTA
+	if (isOtaRuntimeEnabled() && WiFi.status() == WL_CONNECTED) {
+		const unsigned long nowMs = millis();
+		if (!gOtaUpdateInProgress &&
+			gOtaWindowUntilMs != 0 &&
+			static_cast<long>(nowMs - gOtaWindowUntilMs) >= 0L) {
+			gOtaRuntimeEnabled = false;
+			gOtaWindowUntilMs = 0;
+			dbgprintln(ico_info, "[OTA] runtime window expired");
+		}
+		if (isOtaRuntimeEnabled() && (nowMs - gLastOtaHandleMs) >= OTA_HANDLE_INTERVAL_MS) {
+			gLastOtaHandleMs = nowMs;
+			ArduinoOTA.handle(); // throttled handling
+		}
+	}
+#endif                     // OTA
+
+	if (!bootTimeSynced && isTimeSane())
+	{
+		bootTimeSynced = true;
+		lastBootEpoch = static_cast<uint32_t>(time(nullptr));
+		writeUint32File(LAST_BOOT_EPOCH_FILE, lastBootEpoch);
+		setBootTime();
+		if (!bootLogSyncedWritten)
+		{
+			logBootTime(true);
+			bootLogSyncedWritten = true;
+		}
+		dbgprintf(ico_ok, "time synchronized, boot epoch: %lu", static_cast<unsigned long>(lastBootEpoch));
+	}
+
+#ifdef EXTERNAL_HEARTBEAT_URL
+	sendExternalHeartbeat();
+#endif
+
+	// interval based jobs
+	if (millis() - prev_time > interval)
+	{
+		prev_time = millis();
+		yield();
+#ifdef WWW
+		updateHealthSnapshot(bootCount,
+							 lastBootEpoch,
+							 gResetReasonCode,
+							 getResetReasonText(gResetReasonCode),
+							 gResetReasonRaw,
+							 gLastRestartMarker,
+							 bootTimeSynced);
+#endif
+
+		char timestamp[22];
+		getCurrentTimeString(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S");
+		uint32_t heap = ESP.getFreeHeap();
+		if ((alertSent == false) && (heap < 10.0))
+		{
+			pushover("Heap size < 10Kb !!!");
+			alertSent = true;
+		}
+		else
+		{
+			alertSent = false;
+		}
+
+		if (webDebugOn) {
+			char heapFmt[12];
+			formatBytes(heap, heapFmt, sizeof(heapFmt));
+			char buf[128];
+			if (snprintf(buf, sizeof(buf),
+						 "%s | %s | cycle: %lu &mu;s | heap: %s | fragm: %u%% | blocks: %u<br />",
+						 timestamp,
+						 runtime(),
+						 getCpuDelta(),
+						 heapFmt,
+						 getHeapFragmentationPct(),
+						 getMaxFreeBlockBytes()) < 0)
+			{
+				strcpy(buf, "<div class=\"error\">error</div>");
+			}
+			send_Event(buf, "debug");
+			buf[0] = {'\0'};
+		}
+		timestamp[0] = {'\0'};
+
+		const bool controllerUp = isTransportReady();
+#ifdef WITH_MQTT
+		const char *controllerType = "mqtt";
+#else
+		const char *controllerType = "gateway";
+#endif
+
+		if (webDebugOn) {
+			char telem[320];
+			buildTelemetryJson(telem, sizeof(telem),
+				heap,
+				getHeapFragmentationPct(),
+				getMaxFreeBlockBytes(),
+				WiFi.RSSI(),
+				wifiStatusToString(WiFi.status()),
+				lastIndicatorCode,
+				gatewayRxMessage,
+				gatewayTxMessage,
+				sensorRxMessage,
+				sensorTxMessage,
+				indicatorTxErrors,
+				controllerUp,
+				controllerType);
+			send_Event(telem, "telemetry");
+		}
+
+		static unsigned long lastControllerDiagMs = 0;
+		if (millis() - lastControllerDiagMs > 60000UL) // alle 60 sekunden
+		{
+			lastControllerDiagMs = millis();
+			dbgprintf(ico_info,
+					  "[CTRL-DIAG] WiFi=%s(%d) RSSI=%d SSID=%s IP=%s heap=%lu frag=%u maxblk=%u lastInd=%d (%lums ago)",
+					  wifiStatusToString(WiFi.status()),
+					  static_cast<int>(WiFi.status()),
+					  WiFi.RSSI(),
+					  WiFi.SSID().c_str(),
+					  WiFi.localIP().toString().c_str(),
+					  ESP.getFreeHeap(),
+					  getHeapFragmentationPct(),
+					  getMaxFreeBlockBytes(),
+					  lastIndicatorCode,
+					  (lastIndicatorMs == 0 ? 0UL : millis() - lastIndicatorMs));
+		}
+
+		static unsigned long lastInfoSendMs = 0;
+		if (webLiveUiOn && millis() - lastInfoSendMs >= 5000UL) {
+			lastInfoSendMs = millis();
+			updateWebStats();
+		}
+
+	}
+
+	// interval based jobs
+	if (millis() - gw_send_prev_time > gw_send_interval)
+	{
+		gw_send_prev_time = millis();
+
+		sendHeartbeat();
+		send(msgUptime.set(uptime()));
+
+		// every now and then, report ARC statistics ("pseudo-RSSI")
+		if (webDebugOn) {
+			const char* arc = reportArcStatistics();
+			send_Event(arc, "debug");
+		}
+	}
+}
+#endif  // #ifdef USE_ESP32
+
+void setOtaRuntimeEnabled(bool enabled)
+{
+#ifdef OTA
+	if (enabled) {
+		gOtaRuntimeEnabled = true;
+		gOtaWindowUntilMs = millis() + OTA_WINDOW_MS;
+	} else if (!gOtaUpdateInProgress) {
+		gOtaRuntimeEnabled = false;
+		gOtaWindowUntilMs = 0;
+	}
+#else
+	(void)enabled;
+#endif
+}
+
+uint32_t getOtaWindowRemainingSec()
+{
+#ifdef OTA
+	if (!gOtaRuntimeEnabled || gOtaUpdateInProgress || gOtaWindowUntilMs == 0) {
+		return 0U;
+	}
+	const unsigned long now = millis();
+	if (static_cast<long>(now - gOtaWindowUntilMs) >= 0L) {
+		return 0U;
+	}
+	return static_cast<uint32_t>((gOtaWindowUntilMs - now) / 1000UL);
+#else
+	return 0U;
+#endif
+}
+
+// Doppelte Deklarationen entfernt (bereits oben deklariert)
+#pragma endregion
 
 //=====================================================================
 #pragma region telnet functions
@@ -242,9 +586,12 @@ MyMessage arcMessage(SENSOR_ID_ARC, V_TYPE_ARC);
 template <typename T>
 void telnetOut(const T x)
 {
+#ifdef MY_DEBUG	
 	Serial.print(x);
+#endif
+
 #ifdef TELNET
-	if (telnetClient && telnetClient.connected())
+	if (gTelnetRuntimeEnabled && telnetClient && telnetClient.connected())
 	{
 		telnetClient.print(x);
 	}
@@ -311,6 +658,27 @@ void loop_Telnet(void)
 	}
 } // handleTelnet()
 #endif // TELNET
+
+bool isTelnetRuntimeEnabled()
+{
+#ifdef TELNET
+	return gTelnetRuntimeEnabled;
+#else
+	return false;
+#endif
+}
+
+void setTelnetRuntimeEnabled(bool enabled)
+{
+#ifdef TELNET
+	gTelnetRuntimeEnabled = enabled;
+	if (!enabled && telnetClient) {
+		telnetClient.stop();
+	}
+#else
+	(void)enabled;
+#endif
+}
 
 //---------------------------------------------------------------------
 #pragma endregion
@@ -484,7 +852,7 @@ static bool isTimeSane()
 
 static uint32_t readUint32File(const char *path)
 {
-	if (!path || !GATEWAY_FS.begin() || !GATEWAY_FS.exists(path)) {
+	if (!path || !gatewayFsBegin() || !GATEWAY_FS.exists(path)) {
 		return 0;
 	}
 	File file = GATEWAY_FS.open(path, "r");
@@ -502,7 +870,7 @@ static uint32_t readUint32File(const char *path)
 
 static bool writeUint32File(const char *path, uint32_t value)
 {
-	if (!path || !GATEWAY_FS.begin()) {
+	if (!path || !gatewayFsBegin()) {
 		return false;
 	}
 	File file = GATEWAY_FS.open(path, "w");
@@ -512,6 +880,90 @@ static bool writeUint32File(const char *path, uint32_t value)
 	file.printf("%lu\n", static_cast<unsigned long>(value));
 	file.close();
 	return true;
+}
+
+static bool readTextFile(const char *path, char *out, size_t outSize)
+{
+	if (!path || !out || outSize == 0 || !gatewayFsBegin() || !GATEWAY_FS.exists(path)) {
+		return false;
+	}
+	File file = GATEWAY_FS.open(path, "r");
+	if (!file || file.isDirectory()) {
+		return false;
+	}
+	const size_t n = file.readBytesUntil('\n', out, outSize - 1);
+	out[n] = '\0';
+	file.close();
+	return n > 0;
+}
+
+static bool writeTextFile(const char *path, const char *text)
+{
+	if (!path || !text || !gatewayFsBegin()) {
+		return false;
+	}
+	File file = GATEWAY_FS.open(path, "w");
+	if (!file || file.isDirectory()) {
+		return false;
+	}
+	file.print(text);
+	file.print('\n');
+	file.close();
+	return true;
+}
+
+static void removeFileIfExists(const char *path)
+{
+	if (!path || !gatewayFsBegin() || !GATEWAY_FS.exists(path)) {
+		return;
+	}
+	GATEWAY_FS.remove(path);
+}
+
+static void captureResetReasonRaw()
+{
+#ifdef USE_ESP32
+	snprintf(gResetReasonRaw, sizeof(gResetReasonRaw), "esp_reset_reason=%u", static_cast<unsigned>(esp_reset_reason()));
+#else
+	String raw = ESP.getResetInfo();
+	raw.replace("\r", " ");
+	raw.replace("\n", " ");
+	raw.trim();
+	if (raw.length() == 0) {
+		raw = "n/a";
+	}
+	snprintf(gResetReasonRaw, sizeof(gResetReasonRaw), "%s", raw.c_str());
+#endif
+	gResetReasonRaw[sizeof(gResetReasonRaw) - 1] = '\0';
+}
+
+static void persistPlannedRestartMarker(const char *cause)
+{
+	char marker[sizeof(gLastRestartMarker)] = {'\0'};
+	if (snprintf(marker, sizeof(marker),
+				 "cause=%s|uptime_s=%lu|heap=%lu|frag=%u|wifi=%d|rssi=%d",
+				 cause ? cause : "unknown",
+				 millis() / 1000UL,
+				 static_cast<unsigned long>(ESP.getFreeHeap()),
+				 static_cast<unsigned>(getHeapFragmentationPct()),
+				 static_cast<int>(WiFi.status()),
+				 WiFi.RSSI()) < 0) {
+		return;
+	}
+	if (writeTextFile(LAST_RESTART_MARKER_FILE, marker)) {
+		snprintf(gLastRestartMarker, sizeof(gLastRestartMarker), "%s", marker);
+		gLastRestartMarker[sizeof(gLastRestartMarker) - 1] = '\0';
+		dbgprintf(ico_warning, "planned restart marker persisted: %s", gLastRestartMarker);
+	}
+}
+
+static void consumeLastRestartMarker()
+{
+	gLastRestartMarker[0] = '\0';
+	if (readTextFile(LAST_RESTART_MARKER_FILE, gLastRestartMarker, sizeof(gLastRestartMarker))) {
+		dbgprintf(ico_warning, "detected previous planned restart: %s", gLastRestartMarker);
+	}
+	removeFileIfExists(LAST_RESTART_MARKER_FILE);
 }
 
 static void initBootCounter()
@@ -531,7 +983,7 @@ static void initBootCounter()
 void logBootTime(bool ntpOk)
 {
 	dbgprintln(ico_info, "Updating bootlog");
-	boolean fsOk = GATEWAY_FS.begin();
+	boolean fsOk = gatewayFsBegin();
 	if (fsOk)
 	{
 		File file = GATEWAY_FS.open("/bootlog.txt", "a");
@@ -552,12 +1004,14 @@ void logBootTime(bool ntpOk)
 				snprintf(timestamp, sizeof(timestamp), "unsynced@%lus", millis() / 1000UL);
 			}
 
-			char buffer[176] = {'\0'};
+			char buffer[320] = {'\0'};
 			if (snprintf(buffer, sizeof(buffer),
-						 "%s | boot=%lu | rst=%s | heap=%lu | ip=%s",
+						 "%s | boot=%lu | rst=%s | rst_raw=%s | planned=%s | heap=%lu | ip=%s",
 						 timestamp,
 						 static_cast<unsigned long>(bootCount),
 						 resetReason,
+						 gResetReasonRaw,
+						 gLastRestartMarker[0] ? gLastRestartMarker : "none",
 						 static_cast<unsigned long>(ESP.getFreeHeap()),
 						 WiFi.localIP().toString().c_str()) < 0)
 			{
@@ -589,6 +1043,7 @@ void setup_OTA()
 	ArduinoOTA.setHostname(MY_HOSTNAME);
 
 	ArduinoOTA.onStart([]() {
+		gOtaUpdateInProgress = true;
 		// Clean LittleFS
 		// https://arduino-esp8266.readthedocs.io/en/latest/filesystem.html#end
 		GATEWAY_FS.end();
@@ -596,6 +1051,9 @@ void setup_OTA()
 		send_Event("[OTA] Start", "debug");
 	});
 	ArduinoOTA.onEnd([]() {
+		gOtaUpdateInProgress = false;
+		gOtaRuntimeEnabled = false;
+		gOtaWindowUntilMs = 0;
 		dbgprintln(ico_info, "\nEnd");
 		send_Event("[OTA] End", "debug");
 	});
@@ -609,6 +1067,7 @@ void setup_OTA()
 		send_Event(buf, "debug");
 	});
 	ArduinoOTA.onError([](ota_error_t error) {
+		gOtaUpdateInProgress = false;
 		dbgprintf(ico_info, "Error: %d", error);
 		if (error == OTA_AUTH_ERROR)
 		{
@@ -741,7 +1200,13 @@ void getMessagePayload(char *payload, size_t payloadSize, MyMessage message)
 		break;
 	}
 	_payload[0] = {'\0'};
+#ifdef WWW
+	if (isWebDebugEnabled()) {
+		dbgprintf(ico_info, "getMessagePayload %s\n", payload);
+	}
+#else
 	dbgprintf(ico_info, "getMessagePayload %s\n", payload);
+#endif
 }
 
 #include "gw_clients.h"
@@ -757,27 +1222,6 @@ static String mqttBrokerAddress()
 #else
 	return String("n/a");
 #endif
-}
-
-static void buildMqttServerHtml(char *buf, size_t buflen)
-{
-	if (!buf || buflen == 0) {
-		return;
-	}
-	const bool up = isTransportReady();
-	const String broker = mqttBrokerAddress();
-	snprintf(buf, buflen,
-			 "<b>MQTT Server</b><br />"
-			 "<table><thead><tr><th>&nbsp;</th><th>&nbsp;</th></tr></thead><tbody>"
-			 "<tr><td>broker</td><td>%s:%u</td></tr>"
-			 "<tr><td>uplink</td><td>%s</td></tr>"
-			 "<tr><td>wifi</td><td>%s (%d)</td></tr>"
-			 "</tbody></table>",
-			 broker.c_str(),
-			 static_cast<unsigned>(MY_PORT),
-			 up ? "connected" : "disconnected",
-			 (WiFi.status() == WL_CONNECTED) ? "WL_CONNECTED" : "not connected",
-			 static_cast<int>(WiFi.status()));
 }
 #endif
 
@@ -797,7 +1241,7 @@ void updateWebStats()
 	formatBytes(ESP.getFreeSketchSpace(),   freeSketchBuf, sizeof(freeSketchBuf));
 
 	// https://arduino-esp8266.readthedocs.io/en/latest/libraries.html#esp-specific-apis
-	static char page[1024];
+	static char page[3072];
 	page[0] = '\0';
 	char *p = page;
 	size_t rem = sizeof(page);
@@ -818,13 +1262,18 @@ void updateWebStats()
 		} \
 	} while(0)
 
-	WS_APPEND("<table><thead><tr><th>&nbsp;</th><th>&nbsp;</th></tr></thead>");
+	WS_APPEND("<table><thead><tr><th>&nbsp;</th><th>&nbsp;</th></tr></thead><tbody>");
 	WS_APPEND("<tr><td>gateway started at</td><td>%s</td></tr>", getBootTime());
 	WS_APPEND("<tr><td>hostname</td><td>%s</td></tr>",           getWifiHostname().c_str());
 	WS_APPEND("<tr><td>current time</td><td>%s</td></tr>",       timestamp);
 	WS_APPEND("<tr><td>runtime</td><td>%s</td></tr>",            runtime());
 	WS_APPEND("<tr><td>build</td><td>%s %s</td></tr>",           __DATE__, __TIME__);
 	WS_APPEND("<tr><td>sw version</td><td>%s</td></tr>",         __SWVERSION__);
+	WS_APPEND("<tr><td>boot count</td><td>%lu</td></tr>",        static_cast<unsigned long>(bootCount));
+	WS_APPEND("<tr><td>reset reason code</td><td>%u</td></tr>",  static_cast<unsigned>(gResetReasonCode));
+	WS_APPEND("<tr><td>reset reason raw</td><td>%s</td></tr>",   gResetReasonRaw);
+	WS_APPEND("<tr><td><a href=\"/bootlog.txt\">reset reason</a></td><td>%s</td></tr>", resetReason);
+	WS_APPEND("<tr><td>planned restart marker</td><td>%s</td></tr>", gLastRestartMarker[0] ? gLastRestartMarker : "none");
 	WS_APPEND("<tr><td>free heap</td><td>%s</td></tr>",          heapBuf);
 	WS_APPEND("<tr><td>flash space</td><td>%s</td></tr>",        flashBuf);
 	WS_APPEND("<tr><td>used sketch space</td><td>%s</td></tr>",  sketchBuf);
@@ -833,16 +1282,31 @@ void updateWebStats()
 	WS_APPEND("<tr><td>local ip</td><td>%s</td></tr>",           WiFi.localIP().toString().c_str());
 	WS_APPEND("<tr><td>ssid</td><td>%s</td></tr>",               WiFi.SSID().c_str());
 	WS_APPEND("<tr><td>mac address</td><td>%s</td></tr>",        WiFi.macAddress().c_str());
+	WS_APPEND("<tr><td>wifi</td><td>%s</td></tr>",        		(WiFi.status() == WL_CONNECTED) ? "WL_CONNECTED" : "not connected");
 #ifdef MY_CORE_ONLY
 	WS_APPEND("<tr><td>MY_CORE_ONLY</td><td>TRUE</td></tr>");
 #endif
 #ifdef WITH_MQTT
 	WS_APPEND("<tr><td>controller type</td><td>MQTT</td></tr>");
-	WS_APPEND("<tr><td>mqtt broker</td><td>%s:%u</td></tr>", mqttBrokerAddress().c_str(), static_cast<unsigned>(MY_PORT));
-	WS_APPEND("<tr><td>mqtt uplink</td><td>%s</td></tr>", isTransportReady() ? "connected" : "disconnected");
 #endif
-	WS_APPEND("<tr><td><a href=\"/bootlog.txt\">reset reason</a></td><td>%s</td></tr>", resetReason);
-	WS_APPEND("</table>");
+
+	static char clientsBuf[640];
+	clientsBuf[0] = '\0';
+#ifdef WITH_MQTT
+	// buildMqttServerHtml(clientsBuf, sizeof(clientsBuf));
+	const bool up = isTransportReady();
+	const String broker = mqttBrokerAddress();
+	WS_APPEND("<tr><td>broker</td><td>%s:%u</td></tr>", broker.c_str(), static_cast<unsigned>(MY_PORT));
+	WS_APPEND("<tr><td>uplink</td><td>%s</td></tr>", up ? "connected" : "disconnected");
+	WS_APPEND("</tbody></table>");
+#else
+	WS_APPEND("</tbody></table>");
+	buildGwClientsHtml(clientsBuf, sizeof(clientsBuf));
+#endif
+
+	if (clientsBuf[0] != '\0') {
+		WS_APPEND("<br />%s", clientsBuf);
+	}
 #undef WS_APPEND
 
 	send_Event(page, "info");
@@ -894,6 +1358,10 @@ void receive(const MyMessage &message)
 		// {
 		getMessagePayload(payload, sizeof(payload), message);
 		// }
+#ifdef WWW
+		registerPresentedSensor(static_cast<uint8_t>(message.sender),
+								static_cast<uint8_t>(message.sensor));
+#endif
 		break;
 
 	case C_INTERNAL:
@@ -961,20 +1429,21 @@ void receive(const MyMessage &message)
 #endif // TELNET
 
 #ifdef WWW
-	updateSensorStateCache(static_cast<uint8_t>(message.sender),
-						   static_cast<uint8_t>(message.sensor),
-						   msgtype,
-						   payload,
-						   timestamp,
-						   message.getCommand() == C_SET);
-	if (snprintf(webjson, sizeof(webjson), "{\"time\":\"%s\",\"cmd\":\"%s\",\"sender\":\"%d\",\"sensor\":\"%d\",\"ack\":\"%c\",\"msgtype\":\"%s\",\"payload\":\"%s\"}",
+	const bool acceptedSet = updateSensorStateCache(static_cast<uint8_t>(message.sender),
+													static_cast<uint8_t>(message.sensor),
+													msgtype,
+													payload,
+													timestamp,
+													message.getCommand() == C_SET);
+	if (snprintf(webjson, sizeof(webjson), "{\"time\":\"%s\",\"cmd\":\"%s\",\"sender\":\"%d\",\"sensor\":\"%d\",\"ack\":\"%c\",\"msgtype\":\"%s\",\"payload\":\"%s\",\"accepted\":%u}",
 				 timestamp,
 				 cmdtype,
 				 message.sender,
 				 message.sensor,
 				 ack,
 				 msgtype,
-				 payload) < 0)
+				 payload,
+				 acceptedSet ? 1U : 0U) < 0)
 	{
 		webjson[0] = '\0';
 	}
@@ -993,8 +1462,8 @@ int counter = 0;
 static unsigned long wifiReconnectFirstFailMs = 0;
 static unsigned long wifiLastBeginMs = 0;
 static wl_status_t wifiLastStatus = WL_IDLE_STATUS;
-static unsigned long lastIndicatorMs = 0;
-static int lastIndicatorCode = -1;
+static uint8_t wifiReconnectTimeoutCycles = 0;
+static bool wifiStackRecoveryDone = false;
 
 #ifndef USE_ESP32
 WiFiEventHandler wifiDisconnectHandler;
@@ -1002,7 +1471,9 @@ WiFiEventHandler wifiGotIpHandler;
 #endif
 
 static const unsigned long WIFI_BEGIN_INTERVAL_MS = 15000UL;          // retry WiFi.begin every 15s
-static const unsigned long WIFI_RECONNECT_TIMEOUT_MS = 1000UL * 60UL * 3UL; // restart only after 3 minutes
+static const unsigned long WIFI_STACK_RECOVERY_MS = 1000UL * 60UL * 5UL; // hard WiFi reset after 5 minutes disconnected
+static const unsigned long WIFI_RECONNECT_TIMEOUT_MS = 1000UL * 60UL * 10UL; // evaluate every 10 minutes
+static const uint8_t WIFI_TIMEOUT_CYCLES_BEFORE_RESTART = 1; // restart after first timeout window post stage-1
 static const unsigned long NTP_RETRY_INTERVAL_MS = 30000UL;
 static unsigned long lastNtpConfigMs = 0;
 static uint8_t ntpServerSetIndex = 0;
@@ -1192,6 +1663,8 @@ void loop_Wifi()
 		}
 		wifiReconnectFirstFailMs = 0;
 		wifiLastBeginMs = 0;
+		wifiReconnectTimeoutCycles = 0;
+		wifiStackRecoveryDone = false;
 		counter = 0;
 		wifiLastStatus = status;
 		return;
@@ -1224,13 +1697,49 @@ void loop_Wifi()
 	}
 
 	yield();
-	delay(10);
+	//delay(10);
+
+	// Stage 1: hard reset WiFi stack once after 5 minutes disconnect.
+	if (!wifiStackRecoveryDone && (now - wifiReconnectFirstFailMs) >= WIFI_STACK_RECOVERY_MS)
+	{
+		dbgprintln(ico_warning, "[WiFi] stage1 recovery: hard reset WiFi stack");
+		persistPlannedRestartMarker("wifi-stack-recovery");
+		WiFi.disconnect(true);
+		delay(200);
+		WiFi.mode(WIFI_OFF);
+		delay(200);
+		WiFi.mode(WIFI_STA);
+#ifdef MY_CORE_ONLY
+		WiFi.begin(MY_WIFI_SSID, MY_WIFI_PASSWORD);
+#else
+		WiFi.begin();
+#endif
+		wifiLastBeginMs = now;
+		wifiStackRecoveryDone = true;
+		wifiReconnectFirstFailMs = now;
+		wifiReconnectTimeoutCycles = 0;
+		return;
+	}
 
 	// very last resort, with long timeout
 	if ((now - wifiReconnectFirstFailMs) >= WIFI_RECONNECT_TIMEOUT_MS)
 	{
-		logWifiStatus("reconnect timeout reached - restarting");
-		ESP.restart();
+		wifiReconnectTimeoutCycles++;
+		if (wifiReconnectTimeoutCycles >= WIFI_TIMEOUT_CYCLES_BEFORE_RESTART)
+		{
+			logWifiStatus("reconnect timeout reached repeatedly - restarting");
+			persistPlannedRestartMarker("wifi-reconnect-timeout-post-stage1");
+			delay(100);
+			ESP.restart();
+		}
+		else
+		{
+			dbgprintf(ico_warning,
+					  "[WiFi] reconnect timeout cycle %u/%u, keeping gateway alive",
+					  static_cast<unsigned>(wifiReconnectTimeoutCycles),
+					  static_cast<unsigned>(WIFI_TIMEOUT_CYCLES_BEFORE_RESTART));
+			wifiReconnectFirstFailMs = now;
+		}
 	}
 }
 
@@ -1266,7 +1775,10 @@ void setup_wifi()
 	{
 		delay(500);
 		if (++counter > 100)
+		{
+			persistPlannedRestartMarker("setup-wifi-timeout");
 			ESP.restart();
+		}
 		Serial.print(".");
 	}
 
@@ -1406,22 +1918,106 @@ void presentation()
 	present(CHILD_ID_UPTIME, S_INFO, "uptime");
 	present(SENSOR_ID_ARC, S_CUSTOM, F("ARC stats (JSON)") );
 }
+//---------------------------------------------------------------------
+#pragma endregion
+
+#pragma region datetime / midnight handling
+//////////////////////////////////////////////////////////////////////////////////////////////////
+//
+static time_t nextMidnightEpoch = 0;
+static int lastMidnightResetYear = -1;
+static int lastMidnightResetYday = -1;
+
+static bool scheduleNextMidnightFrom(time_t nowEpoch)
+{
+	struct tm localNow;
+	if (localtime_r(&nowEpoch, &localNow) == nullptr) {
+		return false;
+	}
+	localNow.tm_hour = 0;
+	localNow.tm_min = 0;
+	localNow.tm_sec = 0;
+	localNow.tm_mday += 1;
+	const time_t nextEpoch = mktime(&localNow);
+	if (nextEpoch <= 0) {
+		return false;
+	}
+	nextMidnightEpoch = nextEpoch;
+	return true;
+}
+
+boolean checkMidnight()
+{
+	if (!bootTimeSynced) {
+		return false;
+	}
+
+	const time_t nowEpoch = time(nullptr);
+	if (nowEpoch <= 0) {
+		return false;
+	}
+
+	if (nextMidnightEpoch == 0) {
+		(void)scheduleNextMidnightFrom(nowEpoch);
+		return false;
+	}
+
+	if (nowEpoch < nextMidnightEpoch) {
+		return false;
+	}
+
+	struct tm localNow;
+	if (localtime_r(&nowEpoch, &localNow) == nullptr) {
+		return false;
+	}
+
+	// Prevent duplicate resets if time jumps around midnight.
+	if (localNow.tm_year == lastMidnightResetYear && localNow.tm_yday == lastMidnightResetYday) {
+		(void)scheduleNextMidnightFrom(nowEpoch);
+		return false;
+	}
+
+	lastMidnightResetYear = localNow.tm_year;
+	lastMidnightResetYday = localNow.tm_yday;
+	(void)scheduleNextMidnightFrom(nowEpoch);
+	return true;
+}
 
 void loop_NTP()
 {
-	struct tm tm;
-	static time_t lastsec = 0;
-	time_t now = time(nullptr);
-	localtime_r(&now, &tm);
+	static unsigned long lastNtpCheckMs = 0;
+	static unsigned long lastDailySyncMs = 0;
+	const unsigned long nowMs = millis();
 
-	if (tm.tm_sec != lastsec)
+	// Run lightweight NTP scheduling every 5s instead of every loop.
+	if ((nowMs - lastNtpCheckMs) < 5000UL) {
+		return;
+	}
+	lastNtpCheckMs = nowMs;
+
+	if (checkMidnight())
 	{
-		lastsec = tm.tm_sec;
-		// einmal am Tag die Zeit vom NTP Server holen o. jede Stunde "% 3600" aller zwei "% 7200"
-		if ((now % 86400) == 0)
-		{
-			requestNtpSync(true);
-		}
+		// reset all counter on midnight
+		gatewayTxMessage = 0;
+		gatewayRxMessage = 0;
+		sensorTxMessage = 0;
+		sensorRxMessage = 0;
+		indicatorTxErrors = 0;
+	}
+
+	if (!bootTimeSynced || WiFi.status() != WL_CONNECTED) {
+		return;
+	}
+
+	if (lastDailySyncMs == 0) {
+		lastDailySyncMs = nowMs;
+		return;
+	}
+
+	// Daily NTP refresh once every 24h while connected.
+	if ((nowMs - lastDailySyncMs) >= 86400000UL) {
+		requestNtpSync(true);
+		lastDailySyncMs = nowMs;
 	}
 }
 //---------------------------------------------------------------------
@@ -1439,46 +2035,69 @@ void loop_NTP()
 //  - Rot: &#128308; (🔴)
 //  - Gelb: &#128993; (🟡)
 
+#ifdef WITH_WEB_DEBUG
 void indication(const indication_t indicator)
 {
 	lastIndicatorCode = static_cast<int>(indicator);
 	lastIndicatorMs = millis();
+	const bool webDebugEnabled = isWebDebugEnabled();
 
 	switch (indicator)
 	{
 	case INDICATION_GW_TX:
 		gatewayTxMessage++;
 		rxtxStats.nGwTx++;
-		send_Event("&#128994;", "led"); // 🟢
+		if (webDebugEnabled) {
+			send_Event("&#128994;", "led"); // 🟢
+		}
 		break;
 
 	case INDICATION_GW_RX:
 		gatewayRxMessage++;
 		rxtxStats.nGwRx++; 
-		send_Event("&#128308;", "led"); // 🔴
+		if (webDebugEnabled) {
+			send_Event("&#128308;", "led"); // 🔴
+		}
 		break;
 
 	case INDICATION_TX:
 		sensorTxMessage++;
 		rxtxStats.nTx++; 
-		send_Event("&#128994;", "led"); // 🟢
+		if (webDebugEnabled) {
+			send_Event("&#128994;", "led"); // 🟢
+		}
 		break;
 
 	case INDICATION_RX:
 		sensorRxMessage++;
 		rxtxStats.nRx++; 
-		send_Event("&#128308;", "led"); // 🔴
+		if (webDebugEnabled) {
+			send_Event("&#128308;", "led"); // 🔴
+		}
 		break;
 
 	case INDICATION_ERR_TX:
 		rxtxStats.nErr++;
-		send_Event("&#128308;", "led"); // 🔴
+		if (webDebugEnabled) {
+			send_Event("&#128308;", "led"); // 🔴
+		}
 		break;
 
 	default:
-		send_Event("&#128993;", "led"); // 🟡
+		if (webDebugEnabled) {
+			send_Event("&#128993;", "led"); // 🟡
+		}
 		break;
 	};
+
+	if (indicator >= 101 && indicator <= 116)
+	{
+		indicatorTxErrors++;
+	}
+
+	if (!webDebugEnabled) {
+		return;
+	}
 
 	const char *mysIndication = "";
 	if (indicator <= 18)
@@ -1488,7 +2107,6 @@ void indication(const indication_t indicator)
 	else if (indicator >= 101 && indicator <= 116)
 	{
 		mysIndication = mysIndicationErrorCodes100[indicator - 101];
-		indicatorTxErrors++;
 	}
 	else
 	{
@@ -1522,6 +2140,7 @@ void indication(const indication_t indicator)
 			  wifiStatusToString(WiFi.status()),
 			  static_cast<int>(WiFi.status()));
 }
+#endif
 
 
 //=====================================================================
@@ -1531,6 +2150,7 @@ void indication(const indication_t indicator)
 void setup()
 {
 	gResetReasonCode = getResetReasonCode();
+	captureResetReasonRaw();
 	applyTimeZone();
 
 #ifdef MY_DEBUG
@@ -1582,8 +2202,9 @@ void setup()
 	}
 	
 	// boolean fsOK = 
-	GATEWAY_FS.begin();// Filesystem mounten
+	gatewayFsBegin();// Filesystem mounten
 	initBootCounter();
+	consumeLastRestartMarker();
 
 	// initialize statistics
     initStats();
@@ -1599,34 +2220,22 @@ void setup()
 		logBootTime(false);
 	}
 #ifdef WWW
-	updateHealthSnapshot(bootCount, lastBootEpoch, gResetReasonCode, bootTimeSynced);
+	updateHealthSnapshot(bootCount,
+						 lastBootEpoch,
+						 gResetReasonCode,
+						 getResetReasonText(gResetReasonCode),
+						 gResetReasonRaw,
+						 gLastRestartMarker,
+						 bootTimeSynced);
+#endif
+
+#ifdef USE_ESP32
+	startDualCoreTasks();
 #endif
 }
 //---------------------------------------------------------------------
 #pragma endregion
 
-/*
- *
- */
-int day = -1;
-boolean checkMidnight()
-{
-	struct tm tm;
-	time_t now = time(&now);
-	localtime_r(&now, &tm);
-	char stoday[3] = "\0";
-	strftime(stoday, sizeof(stoday), "%d", &tm); // http://www.cplusplus.com/reference/ctime/strftime/
-	int today = atoi(stoday);
-	boolean result = false;
-	if (day == -1)
-		day = today; // init values
-	if (today != day)
-	{
-		day = today; // set day to new day
-		result = true;
-	}
-	return result;
-}
 
 //=====================================================================
 #pragma region MySensors loop
@@ -1635,19 +2244,16 @@ boolean checkMidnight()
 void loop()
 {
 	avgCpuDelta = getCpuDelta();
+#ifdef WWW
+	const bool webDebugOn = isWebDebugEnabled();
+	const bool webLiveUiOn = isWebLiveUiEnabled();
+#else
+	const bool webDebugOn = false;
+	const bool webLiveUiOn = false;
+#endif
 
 	delay(10); // https://github.com/espressif/esp-idf/issues/1021
 	yield();
-
-	if (checkMidnight())
-	{
-		// reset all counter on midnight
-		gatewayTxMessage = 0;
-		gatewayRxMessage = 0;
-		sensorTxMessage = 0;
-		sensorRxMessage = 0;
-		indicatorTxErrors = 0;
-	}
 
 	if (WiFi.status() != WL_CONNECTED)
 	{
@@ -1659,7 +2265,9 @@ void loop()
 #endif // WWW
 
 #ifdef TELNET
-	loop_Telnet(); // handle telnet server
+	if (isTelnetRuntimeEnabled()) {
+		loop_Telnet(); // handle telnet server
+	}
 #endif
 
 #ifdef NTP
@@ -1669,8 +2277,45 @@ void loop()
 	}
 #endif // NTP
 
+#ifdef WWW
+#ifdef WITH_MQTT
+	{
+		static unsigned long lastCtrlStatusProbeMs = 0;
+		static unsigned long lastCtrlStatusSendMs = 0;
+		static bool ctrlStatusInitialized = false;
+		static bool lastCtrlStatus = false;
+		const unsigned long nowMs = millis();
+		if ((nowMs - lastCtrlStatusProbeMs) >= 5000UL) {
+			lastCtrlStatusProbeMs = nowMs;
+			const bool controllerUpNow = isTransportReady();
+			if (!ctrlStatusInitialized ||
+				controllerUpNow != lastCtrlStatus ||
+				(nowMs - lastCtrlStatusSendMs) >= 30000UL) {
+				lastCtrlStatus = controllerUpNow;
+				ctrlStatusInitialized = true;
+				lastCtrlStatusSendMs = nowMs;
+				send_Event(controllerUpNow ? "1" : "0", "ctrlstatus");
+			}
+		}
+	}
+#endif
+#endif
+
 #ifdef OTA
-	ArduinoOTA.handle(); // neu seit 2.2
+	if (isOtaRuntimeEnabled() && WiFi.status() == WL_CONNECTED) {
+		const unsigned long nowMs = millis();
+		if (!gOtaUpdateInProgress &&
+			gOtaWindowUntilMs != 0 &&
+			static_cast<long>(nowMs - gOtaWindowUntilMs) >= 0L) {
+			gOtaRuntimeEnabled = false;
+			gOtaWindowUntilMs = 0;
+			dbgprintln(ico_info, "[OTA] runtime window expired");
+		}
+		if (isOtaRuntimeEnabled() && (nowMs - gLastOtaHandleMs) >= OTA_HANDLE_INTERVAL_MS) {
+			gLastOtaHandleMs = nowMs;
+			ArduinoOTA.handle(); // throttled handling
+		}
+	}
 #endif					 // OTA
 
 	if (!bootTimeSynced && isTimeSane())
@@ -1697,7 +2342,13 @@ void loop()
 		prev_time = millis();
 		yield();
 #ifdef WWW
-		updateHealthSnapshot(bootCount, lastBootEpoch, gResetReasonCode, bootTimeSynced);
+		updateHealthSnapshot(bootCount,
+							 lastBootEpoch,
+							 gResetReasonCode,
+							 getResetReasonText(gResetReasonCode),
+							 gResetReasonRaw,
+							 gLastRestartMarker,
+							 bootTimeSynced);
 #endif
 
 		char timestamp[22];
@@ -1713,23 +2364,25 @@ void loop()
 			alertSent = false;
 		}
 
-		char heapFmt[12];
-		formatBytes(heap, heapFmt, sizeof(heapFmt));
-		char buf[128];
-		if (snprintf(buf, sizeof(buf),
-					 "%s | %s | cycle: %lu &mu;s | heap: %s | fragm: %u%% | blocks: %u<br />",
-					 timestamp,
-					 runtime(),
-					 getCpuDelta(),
-					 heapFmt,
-					 getHeapFragmentationPct(),
-					 getMaxFreeBlockBytes()) < 0)
-		{
-			strcpy(buf, "<div class=\"error\">error</div>");
+		if (webDebugOn) {
+			char heapFmt[12];
+			formatBytes(heap, heapFmt, sizeof(heapFmt));
+			char buf[128];
+			if (snprintf(buf, sizeof(buf),
+						 "%s | %s | cycle: %lu &mu;s | heap: %s | fragm: %u%% | blocks: %u<br />",
+						 timestamp,
+						 runtime(),
+						 getCpuDelta(),
+						 heapFmt,
+						 getHeapFragmentationPct(),
+						 getMaxFreeBlockBytes()) < 0)
+			{
+				strcpy(buf, "<div class=\"error\">error</div>");
+			}
+			send_Event(buf, "debug");
+			buf[0] = {'\0'};
 		}
-		send_Event(buf, "debug");
 		timestamp[0] = {'\0'};
-		buf[0] = {'\0'};
 
 		const bool controllerUp = isTransportReady();
 #ifdef WITH_MQTT
@@ -1738,25 +2391,27 @@ void loop()
 		const char *controllerType = "gateway";
 #endif
 
-		char telem[320];
-		buildTelemetryJson(telem, sizeof(telem),
-			heap,
-			getHeapFragmentationPct(),
-			getMaxFreeBlockBytes(),
-			WiFi.RSSI(),
-			wifiStatusToString(WiFi.status()),
-			lastIndicatorCode,
-			gatewayRxMessage,
-			gatewayTxMessage,
-			sensorRxMessage,
-			sensorTxMessage,
-			indicatorTxErrors,
-			controllerUp,
-			controllerType);
-		send_Event(telem, "telemetry");
+		if (webDebugOn) {
+			char telem[320];
+			buildTelemetryJson(telem, sizeof(telem),
+				heap,
+				getHeapFragmentationPct(),
+				getMaxFreeBlockBytes(),
+				WiFi.RSSI(),
+				wifiStatusToString(WiFi.status()),
+				lastIndicatorCode,
+				gatewayRxMessage,
+				gatewayTxMessage,
+				sensorRxMessage,
+				sensorTxMessage,
+				indicatorTxErrors,
+				controllerUp,
+				controllerType);
+			send_Event(telem, "telemetry");
+		}
 
 		static unsigned long lastControllerDiagMs = 0;
-		if (millis() - lastControllerDiagMs > 30000UL)
+		if (millis() - lastControllerDiagMs > 60000UL) // alle 60 sekunden
 		{
 			lastControllerDiagMs = millis();
 			dbgprintf(ico_info,
@@ -1774,23 +2429,11 @@ void loop()
 		}
 
 		static unsigned long lastInfoSendMs = 0;
-		if (millis() - lastInfoSendMs >= 5000UL) {
+		if (webLiveUiOn && millis() - lastInfoSendMs >= 5000UL) {
 			lastInfoSendMs = millis();
 			updateWebStats();
 		}
 
-		static unsigned long lastGwClientsSendMs = 0;
-		if (millis() - lastGwClientsSendMs >= 5000UL) {
-			lastGwClientsSendMs = millis();
-			static char clientsBuf[640];
-			clientsBuf[0] = '\0';
-#ifdef WITH_MQTT
-			buildMqttServerHtml(clientsBuf, sizeof(clientsBuf));
-#else
-			buildGwClientsHtml(clientsBuf, sizeof(clientsBuf));
-#endif
-			send_Event(clientsBuf, "clients");
-		}
 	}
 
 	// interval based jobs
@@ -1802,8 +2445,10 @@ void loop()
 		send(msgUptime.set(uptime()));
 
 		// every now and then, report ARC statistics ("pseudo-RSSI")
-		const char* arc = reportArcStatistics();
-		send_Event(arc, "debug");
+		if (webDebugOn) {
+			const char* arc = reportArcStatistics();
+			send_Event(arc, "debug");
+		}
 	}
 }
 //---------------------------------------------------------------------

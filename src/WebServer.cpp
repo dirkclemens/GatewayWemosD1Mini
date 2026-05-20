@@ -23,6 +23,8 @@
 #endif
 #include <ESPAsyncWebServer.h>
 #include <cstring>
+#include <cstdlib>
+#include <cmath>
 
 AsyncWebServer server(80);
 AsyncEventSource events("/events");
@@ -37,7 +39,16 @@ static NodeNameEntry nodeNames[NODE_NAME_SLOTS];
 static uint32_t gBootCount = 0;
 static uint32_t gLastBootEpoch = 0;
 static uint8_t gResetReasonCode = 0;
+static char gResetReasonText[64] = {'\0'};
+static char gResetReasonRaw[128] = {'\0'};
+static char gLastRestartMarker[160] = {'\0'};
 static bool gNtpSynced = false;
+#ifdef WITH_WEB_DEBUG
+static bool gWebDebugEnabled = false;
+#else
+static bool gWebDebugEnabled = false;
+#endif
+static bool gWebLiveUiEnabled = false;
 
 #ifdef USE_ESP32
 static const uint16_t SENSOR_STATE_SLOTS = 256;
@@ -50,6 +61,134 @@ struct SensorStateEntry {
 	bool used;
 };
 static SensorStateEntry sensorStates[SENSOR_STATE_SLOTS];
+struct PresentedSensorEntry {
+	uint8_t nodeId;
+	uint8_t sensorId;
+	bool used;
+};
+static PresentedSensorEntry presentedSensors[SENSOR_STATE_SLOTS];
+
+static bool typeEquals(const char *msgType, const char *expected)
+{
+	if (!msgType || !expected) {
+		return false;
+	}
+	const size_t len = strlen(expected);
+	return strncmp(msgType, expected, len) == 0 &&
+		   (msgType[len] == '\0' || msgType[len] == ' ');
+}
+
+static bool isUnknownTypePlaceholder(const char *msgType)
+{
+	return msgType && strncmp(msgType, "type:", 5) == 0;
+}
+
+static bool parseLeadingNumber(const char *payload, double &value)
+{
+	if (!payload) {
+		return false;
+	}
+	char *end = nullptr;
+	value = strtod(payload, &end);
+	return end != payload && std::isfinite(value);
+}
+
+static bool isBinaryLikeValue(double value)
+{
+	const double rounded = round(value);
+	return fabs(value - rounded) < 0.001 && (rounded == 0.0 || rounded == 1.0);
+}
+
+static int findPresentedSensorIndex(uint8_t nodeId, uint8_t sensorId)
+{
+	for (uint16_t i = 0; i < SENSOR_STATE_SLOTS; i++) {
+		if (presentedSensors[i].used &&
+			presentedSensors[i].nodeId == nodeId &&
+			presentedSensors[i].sensorId == sensorId) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static int findFreePresentedSensorSlot()
+{
+	for (uint16_t i = 0; i < SENSOR_STATE_SLOTS; i++) {
+		if (!presentedSensors[i].used) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+static bool nodeHasPresentedChildren(uint8_t nodeId)
+{
+	for (uint16_t i = 0; i < SENSOR_STATE_SLOTS; i++) {
+		if (presentedSensors[i].used && presentedSensors[i].nodeId == nodeId) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool shouldAcceptSensorValue(uint8_t nodeId,
+									uint8_t sensorId,
+									const char *msgType,
+									const char *payload)
+{
+	if (!msgType || !msgType[0] || !payload || !payload[0]) {
+		return false;
+	}
+
+	// Child 255 is reserved for internal/system messages, not regular sensors.
+	if (sensorId == 255) {
+		return false;
+	}
+	if (isUnknownTypePlaceholder(msgType)) {
+		dbgprintf(ico_warning, "drop unknown SET type: node=%u child=%u %s", nodeId, sensorId, msgType);
+		return false;
+	}
+	if (nodeHasPresentedChildren(nodeId) && findPresentedSensorIndex(nodeId, sensorId) < 0) {
+		dbgprintf(ico_warning, "accept unpresented sensor id: node=%u child=%u (learning)", nodeId, sensorId);
+	}
+
+	double numericValue = 0.0;
+	const bool isNumeric = parseLeadingNumber(payload, numericValue);
+	if (isNumeric && fabs(numericValue) > 1000000.0) {
+		dbgprintf(ico_warning, "drop implausible sensor value: %s=%s", msgType, payload);
+		return false;
+	}
+
+	if (typeEquals(msgType, "V_TEMP")) {
+		return isNumeric && numericValue >= -60.0 && numericValue <= 125.0;
+	}
+	if (typeEquals(msgType, "V_HUM")) {
+		return isNumeric && numericValue >= 0.0 && numericValue <= 100.0;
+	}
+	if (typeEquals(msgType, "V_VOLTAGE")) {
+		return isNumeric && numericValue >= 0.0 && numericValue <= 500.0;
+	}
+	if (typeEquals(msgType, "V_PERCENTAGE") || typeEquals(msgType, "V_LEVEL")) {
+		return isNumeric && numericValue >= 0.0 && numericValue <= 100.0;
+	}
+	if (typeEquals(msgType, "V_STATUS") ||
+		typeEquals(msgType, "V_TRIPPED") ||
+		typeEquals(msgType, "V_ARMED") ||
+		typeEquals(msgType, "V_LOCK_STATUS")) {
+		return isNumeric && isBinaryLikeValue(numericValue);
+	}
+	if (typeEquals(msgType, "V_HVAC_FLOW_MODE")) {
+		return isNumeric && fabs(numericValue - round(numericValue)) < 0.001 &&
+			   numericValue >= 0.0 && numericValue <= 6.0;
+	}
+	if (typeEquals(msgType, "V_UNIT_PREFIX")) {
+		// Unit prefixes are expected to be textual ("V", "m", "cm", ...).
+		return !isNumeric;
+	}
+
+	// Keep known free-form values (e.g. V_TEXT, V_CUSTOM) after basic checks above.
+	return true;
+}
 #endif
 
 //flag to use from web update to reboot the ESP
@@ -108,6 +247,50 @@ static int findFreeNodeNameSlot()
 	return -1;
 }
 
+static bool isDebugEventSection(const char *section)
+{
+	return section &&
+		   (strcmp(section, "debug") == 0 ||
+		    strcmp(section, "indicator") == 0 ||
+		    strcmp(section, "led") == 0 ||
+		    strcmp(section, "telemetry") == 0);
+}
+
+static bool isLiveUiEventSection(const char *section)
+{
+	return section &&
+		   (strcmp(section, "info") == 0 ||
+		    strcmp(section, "clients") == 0 ||
+		    isDebugEventSection(section));
+}
+
+static bool writeRestartMarker(const char *reason)
+{
+	if (!reason || !gatewayFsBegin()) {
+		return false;
+	}
+	File file = GATEWAY_FS.open("/last_restart_marker.txt", "w");
+	if (!file || file.isDirectory()) {
+		return false;
+	}
+	char marker[160] = {'\0'};
+	if (snprintf(marker, sizeof(marker),
+				 "cause=%s|uptime_s=%lu|heap=%lu|frag=%u|wifi=%d|rssi=%d",
+				 reason,
+				 millis() / 1000UL,
+				 static_cast<unsigned long>(ESP.getFreeHeap()),
+				 static_cast<unsigned>(getHeapFragmentationPct()),
+				 static_cast<int>(WiFi.status()),
+				 WiFi.RSSI()) < 0) {
+		file.close();
+		return false;
+	}
+	file.print(marker);
+	file.print('\n');
+	file.close();
+	return true;
+}
+
 #ifdef USE_ESP32
 static int findSensorStateIndex(uint8_t nodeId, uint8_t sensorId)
 {
@@ -129,26 +312,28 @@ static int findFreeSensorStateSlot()
 	return -1;
 }
 
-static void appendJsonEscaped(String &out, const char *text)
+static void appendJsonEscapedToStream(AsyncResponseStream *resp, const char *text)
 {
-	if (!text) {
+	if (!resp || !text) {
 		return;
 	}
 	const char *p = text;
 	while (*p) {
-		if (*p == '\\') {
-			out += "\\\\";
-		} else if (*p == '"') {
-			out += "\\\"";
-		} else {
-			out += *p;
+		if (*p == '\\' || *p == '"') {
+			resp->write(static_cast<uint8_t>('\\'));
 		}
+		resp->write(static_cast<uint8_t>(*p));
 		p++;
 	}
 }
 
-static String sensorStateAsJson()
+static void sendSensorStateJson(AsyncWebServerRequest *request)
 {
+	if (!request) {
+		return;
+	}
+
+	AsyncResponseStream *resp = request->beginResponseStream("application/json");
 	bool hasNode[256] = {false};
 	for (uint16_t i = 0; i < SENSOR_STATE_SLOTS; i++) {
 		if (sensorStates[i].used) {
@@ -156,19 +341,17 @@ static String sensorStateAsJson()
 		}
 	}
 
-	String out = "{";
+	resp->print("{");
 	bool firstNode = true;
 	for (uint16_t node = 0; node <= 255; node++) {
 		if (!hasNode[node]) {
 			continue;
 		}
 		if (!firstNode) {
-			out += ",";
+			resp->print(",");
 		}
 		firstNode = false;
-		out += "\"";
-		out += node;
-		out += "\":{";
+		resp->printf("\"%u\":{", node);
 
 		bool firstSensor = true;
 		for (uint16_t i = 0; i < SENSOR_STATE_SLOTS; i++) {
@@ -176,23 +359,21 @@ static String sensorStateAsJson()
 				continue;
 			}
 			if (!firstSensor) {
-				out += ",";
+				resp->print(",");
 			}
 			firstSensor = false;
-			out += "\"";
-			out += sensorStates[i].sensorId;
-			out += "\":{\"value\":\"";
-			appendJsonEscaped(out, sensorStates[i].value);
-			out += "\",\"time\":\"";
-			appendJsonEscaped(out, sensorStates[i].time);
-			out += "\",\"type\":\"";
-			appendJsonEscaped(out, sensorStates[i].type);
-			out += "\"}";
+			resp->printf("\"%u\":{\"value\":\"", sensorStates[i].sensorId);
+			appendJsonEscapedToStream(resp, sensorStates[i].value);
+			resp->print("\",\"time\":\"");
+			appendJsonEscapedToStream(resp, sensorStates[i].time);
+			resp->print("\",\"type\":\"");
+			appendJsonEscapedToStream(resp, sensorStates[i].type);
+			resp->print("\"}");
 		}
-		out += "}";
+		resp->print("}");
 	}
-	out += "}";
-	return out;
+	resp->print("}");
+	request->send(resp);
 }
 #endif
 
@@ -345,6 +526,12 @@ void send_Event(const char *content, const char *section)
 	if (content == nullptr || section == nullptr || content[0] == '\0') {
 		return;
 	}
+	if (!gWebLiveUiEnabled && isLiveUiEventSection(section)) {
+		return;
+	}
+	if (!gWebDebugEnabled && isDebugEventSection(section)) {
+		return;
+	}
 	if (events.count() == 0) {
 		return;
 	}
@@ -360,7 +547,41 @@ void send_Event(const char *content, const char *section)
 	events.send(content, section);
 }
 
-void updateSensorStateCache(uint8_t nodeId,
+bool isWebDebugCompiled()
+{
+#ifdef WITH_WEB_DEBUG
+	return true;
+#else
+	return false;
+#endif
+}
+
+bool isWebDebugEnabled()
+{
+	return gWebDebugEnabled;
+}
+
+void setWebDebugEnabled(bool enabled)
+{
+#ifdef WITH_WEB_DEBUG
+	gWebDebugEnabled = enabled;
+#else
+	(void)enabled;
+	gWebDebugEnabled = false;
+#endif
+}
+
+bool isWebLiveUiEnabled()
+{
+	return gWebLiveUiEnabled;
+}
+
+void setWebLiveUiEnabled(bool enabled)
+{
+	gWebLiveUiEnabled = enabled;
+}
+
+bool updateSensorStateCache(uint8_t nodeId,
 							uint8_t sensorId,
 							const char *msgType,
 							const char *payload,
@@ -369,17 +590,21 @@ void updateSensorStateCache(uint8_t nodeId,
 {
 #ifdef USE_ESP32
 	if (!isSetMessage) {
-		return;
+		return false;
+	}
+	if (!shouldAcceptSensorValue(nodeId, sensorId, msgType, payload)) {
+		return false;
 	}
 
 	int idx = findSensorStateIndex(nodeId, sensorId);
 	if (idx < 0) {
 		idx = findFreeSensorStateSlot();
 		if (idx < 0) {
-			return;
+			return false;
 		}
 	}
 
+	registerPresentedSensor(nodeId, sensorId);
 	sensorStates[idx].used = true;
 	sensorStates[idx].nodeId = nodeId;
 	sensorStates[idx].sensorId = sensorId;
@@ -389,6 +614,7 @@ void updateSensorStateCache(uint8_t nodeId,
 	sensorStates[idx].time[sizeof(sensorStates[idx].time) - 1] = '\0';
 	strncpy(sensorStates[idx].type, msgType ? msgType : "", sizeof(sensorStates[idx].type) - 1);
 	sensorStates[idx].type[sizeof(sensorStates[idx].type) - 1] = '\0';
+	return true;
 #else
 	(void)nodeId;
 	(void)sensorId;
@@ -396,27 +622,61 @@ void updateSensorStateCache(uint8_t nodeId,
 	(void)payload;
 	(void)timestamp;
 	(void)isSetMessage;
+	return false;
+#endif
+}
+
+void registerPresentedSensor(uint8_t nodeId, uint8_t sensorId)
+{
+#ifdef USE_ESP32
+	if (sensorId == 255) {
+		return;
+	}
+
+	int idx = findPresentedSensorIndex(nodeId, sensorId);
+	if (idx < 0) {
+		idx = findFreePresentedSensorSlot();
+		if (idx < 0) {
+			return;
+		}
+	}
+
+	presentedSensors[idx].used = true;
+	presentedSensors[idx].nodeId = nodeId;
+	presentedSensors[idx].sensorId = sensorId;
+#else
+	(void)nodeId;
+	(void)sensorId;
 #endif
 }
 
 void updateHealthSnapshot(uint32_t bootCount,
 						  uint32_t lastBootEpoch,
 						  uint8_t resetReasonCode,
+						  const char *resetReasonText,
+						  const char *resetReasonRaw,
+						  const char *lastRestartMarker,
 						  bool ntpSynced)
 {
 	gBootCount = bootCount;
 	gLastBootEpoch = lastBootEpoch;
 	gResetReasonCode = resetReasonCode;
+	strncpy(gResetReasonText, resetReasonText ? resetReasonText : "unknown", sizeof(gResetReasonText) - 1);
+	gResetReasonText[sizeof(gResetReasonText) - 1] = '\0';
+	strncpy(gResetReasonRaw, resetReasonRaw ? resetReasonRaw : "n/a", sizeof(gResetReasonRaw) - 1);
+	gResetReasonRaw[sizeof(gResetReasonRaw) - 1] = '\0';
+	strncpy(gLastRestartMarker, lastRestartMarker ? lastRestartMarker : "", sizeof(gLastRestartMarker) - 1);
+	gLastRestartMarker[sizeof(gLastRestartMarker) - 1] = '\0';
 	gNtpSynced = ntpSynced;
 }
 
-String getNodeNameById(uint8_t nodeId)
+const char *getNodeNameById(uint8_t nodeId)
 {
 	int idx = findNodeNameIndexById(nodeId);
 	if (idx >= 0) {
-		return nodeNames[idx].name;
+		return nodeNames[idx].name.c_str();
 	}
-	return String("");
+	return "";
 }
 
 
@@ -552,7 +812,7 @@ void send_Status(AsyncWebServerRequest *request)
  */
 String processor(const String& var)
 {
-	// dbgprintln(ico_null, var.c_str());
+	(void)var;
 	return String();
 }
 
@@ -608,7 +868,7 @@ void setup_WebServer()
 
 	server.on("/api/sensor-state", HTTP_GET, [](AsyncWebServerRequest *request){
 #ifdef USE_ESP32
-		request->send(200, "application/json", sensorStateAsJson());
+		sendSensorStateJson(request);
 #else
 		request->send(200, "application/json", "{}");
 #endif
@@ -653,6 +913,67 @@ void setup_WebServer()
 
 		bool ok = saveNodeNames();
 		request->send(ok ? 200 : 500, "application/json", ok ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"save failed\"}");
+	});
+
+	server.on("/api/web-settings", HTTP_GET, [](AsyncWebServerRequest *request){
+		const unsigned long intervalSec = static_cast<unsigned long>(getUiUpdateIntervalMs() / 1000UL);
+		const unsigned long otaWindowSec = static_cast<unsigned long>(getOtaWindowRemainingSec());
+		char json[288] = {'\0'};
+		snprintf(json, sizeof(json),
+				 "{\"debugCompiled\":%s,\"debugEnabled\":%s,\"liveUiEnabled\":%s,\"telnetEnabled\":%s,"
+				 "\"otaEnabled\":%s,\"otaWindowSec\":%lu,\"intervalSec\":%lu}",
+				 isWebDebugCompiled() ? "true" : "false",
+				 isWebDebugEnabled() ? "true" : "false",
+				 isWebLiveUiEnabled() ? "true" : "false",
+				 isTelnetRuntimeEnabled() ? "true" : "false",
+				 isOtaRuntimeEnabled() ? "true" : "false",
+				 otaWindowSec,
+				 intervalSec);
+		request->send(200, "application/json", json);
+	});
+
+	server.on("/api/web-settings", HTTP_POST, [](AsyncWebServerRequest *request){
+		if (request->hasParam("debug", true)) {
+			const String v = trimCopy(request->getParam("debug", true)->value());
+			const bool enabled = (v == "1" || v == "true" || v == "on");
+			setWebDebugEnabled(enabled);
+		}
+		if (request->hasParam("live", true)) {
+			const String v = trimCopy(request->getParam("live", true)->value());
+			const bool enabled = (v == "1" || v == "true" || v == "on");
+			setWebLiveUiEnabled(enabled);
+		}
+		if (request->hasParam("telnet", true)) {
+			const String v = trimCopy(request->getParam("telnet", true)->value());
+			const bool enabled = (v == "1" || v == "true" || v == "on");
+			setTelnetRuntimeEnabled(enabled);
+		}
+		if (request->hasParam("ota", true)) {
+			const String v = trimCopy(request->getParam("ota", true)->value());
+			const bool enabled = (v == "1" || v == "true" || v == "on");
+			setOtaRuntimeEnabled(enabled);
+		}
+		if (request->hasParam("interval", true)) {
+			const String v = trimCopy(request->getParam("interval", true)->value());
+			const long sec = v.toInt();
+			if (sec > 0) {
+				setUiUpdateIntervalMs(static_cast<uint32_t>(sec) * 1000UL);
+			}
+		}
+		const unsigned long intervalSec = static_cast<unsigned long>(getUiUpdateIntervalMs() / 1000UL);
+		const unsigned long otaWindowSec = static_cast<unsigned long>(getOtaWindowRemainingSec());
+		char json[288] = {'\0'};
+		snprintf(json, sizeof(json),
+				 "{\"ok\":true,\"debugCompiled\":%s,\"debugEnabled\":%s,\"liveUiEnabled\":%s,\"telnetEnabled\":%s,"
+				 "\"otaEnabled\":%s,\"otaWindowSec\":%lu,\"intervalSec\":%lu}",
+				 isWebDebugCompiled() ? "true" : "false",
+				 isWebDebugEnabled() ? "true" : "false",
+				 isWebLiveUiEnabled() ? "true" : "false",
+				 isTelnetRuntimeEnabled() ? "true" : "false",
+				 isOtaRuntimeEnabled() ? "true" : "false",
+				 otaWindowSec,
+				 intervalSec);
+		request->send(200, "application/json", json);
 	});
 
 	server.on("/bootlog.txt", [](AsyncWebServerRequest *request){
@@ -740,12 +1061,12 @@ void setup_WebServer()
 		const bool wifiConnected = (WiFi.status() == WL_CONNECTED);
 		const time_t nowTs = time(nullptr);
 		const unsigned long nowEpoch = (nowTs > 0) ? static_cast<unsigned long>(nowTs) : 0UL;
-		const char *resetTxt = (gResetReasonCode < 7) ? RST_REASONS[gResetReasonCode] : "UNKNOWN";
 
-		char json[320] = {'\0'};
+		char json[768] = {'\0'};
 		snprintf(json, sizeof(json),
 				 "{\"ok\":true,\"host\":\"%s\",\"boot_count\":%lu,\"last_boot_epoch\":%lu,\"ntp_synced\":%s,"
-				 "\"reset_reason_code\":%u,\"reset_reason\":\"%s\",\"uptime_s\":%lu,"
+				 "\"reset_reason_code\":%u,\"reset_reason\":\"%s\",\"reset_reason_raw\":\"%s\","
+				 "\"planned_restart_marker\":\"%s\",\"uptime_s\":%lu,"
 				 "\"wifi_connected\":%s,\"wifi_status\":%d,\"heap\":%lu,\"heap_frag\":%u,"
 				 "\"max_free_block\":%lu,\"rssi\":%d,\"sse_clients\":%u,\"now_epoch\":%lu}",
 				 getWifiHostname().c_str(),
@@ -753,7 +1074,9 @@ void setup_WebServer()
 				 static_cast<unsigned long>(gLastBootEpoch),
 				 gNtpSynced ? "true" : "false",
 				 static_cast<unsigned>(gResetReasonCode),
-				 resetTxt,
+				 gResetReasonText,
+				 gResetReasonRaw,
+				 gLastRestartMarker[0] ? gLastRestartMarker : "none",
 				 uptimeSec,
 				 wifiConnected ? "true" : "false",
 				 static_cast<int>(WiFi.status()),
@@ -807,6 +1130,9 @@ void loop_WebServer()
 {
 	if(shouldReboot){
 		dbgprintln(ico_info, "rebooting...");
+		if (!writeRestartMarker("web-ui-reboot")) {
+			dbgprintln(ico_warning, "could not persist web reboot marker");
+		}
 		delay(100);
 		ESP.restart();
 	}

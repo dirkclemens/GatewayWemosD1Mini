@@ -39,6 +39,27 @@ const char index_html[] PROGMEM = R"=====(
   var telemetryHistory = [];
   var maxLogLines = 20, maxTelemetryPoints = 60;
   var logLevel = 'info', currentTab = 'messages';
+  var intervalChoices = [1,2,5,10,15,20,30,45,60];
+  var webSettings = { debugCompiled: true, debugEnabled: false, liveUiEnabled: false, telnetEnabled: false, otaEnabled: false, otaWindowSec: 0, intervalSec: 1 };
+  var sseConnected = false;
+  var mqttConnected = null;
+
+  function renderConnStatus() {
+    var el = document.getElementById('connStatus');
+    if (!el) return;
+    if (!sseConnected) {
+      el.textContent = 'SSE ○';
+      el.className = 'conn-status conn-err';
+      return;
+    }
+    if (mqttConnected === null) {
+      el.textContent = 'SSE ●';
+      el.className = 'conn-status conn-ok';
+      return;
+    }
+    el.textContent = mqttConnected ? 'MQTT ●' : 'MQTT ○';
+    el.className = mqttConnected ? 'conn-status conn-ok' : 'conn-status conn-err';
+  }
 
   // ── Tab navigation ────────────────────────────────────────────────
   function setTab(name) {
@@ -54,26 +75,148 @@ const char index_html[] PROGMEM = R"=====(
   function startEvents() {
     var es = new EventSource('/events');
     es.onopen = function() {
-      var el = document.getElementById('connStatus');
-      el.textContent = 'SSE ●'; el.className = 'conn-status conn-ok';
+      sseConnected = true;
+      renderConnStatus();
     };
     es.onerror = function(e) {
       if (e.target.readyState != EventSource.OPEN) {
-        var el = document.getElementById('connStatus');
-        el.textContent = 'SSE ○'; el.className = 'conn-status conn-err';
+        sseConnected = false;
+        renderConnStatus();
       }
     };
-    es.addEventListener('debug',     function(e){ appendLogLine('debug',     e.data, detectLevel(e.data)); }, false);
-    es.addEventListener('indicator', function(e){ appendLogLine('indicator', e.data, detectLevel(e.data)); }, false);
-    es.addEventListener('info',      function(e){ document.getElementById('infoContent').innerHTML = e.data; }, false);
-    es.addEventListener('clients',   function(e){ document.getElementById('gwClientsContent').innerHTML = e.data; }, false);
-    es.addEventListener('led',       function(e){ document.getElementById('ledStatus').innerHTML = e.data; }, false);
+    es.addEventListener('debug', function(e){
+      if (webSettings.debugEnabled) appendLogLine('debug', e.data, detectLevel(e.data));
+    }, false);
+    es.addEventListener('indicator', function(e){
+      if (webSettings.debugEnabled) appendLogLine('indicator', e.data, detectLevel(e.data));
+    }, false);
+    es.addEventListener('info', function(e){
+      if (webSettings.liveUiEnabled) document.getElementById('infoContent').innerHTML = e.data;
+    }, false);
+    es.addEventListener('led', function(e){
+      if (webSettings.debugEnabled) document.getElementById('ledStatus').innerHTML = e.data;
+    }, false);
     es.addEventListener('messagesjson', function(e) {
       try { handleMessage(JSON.parse(e.data)); } catch(err){ console.log('msg parse error', err); }
     }, false);
+    es.addEventListener('ctrlstatus', function(e) {
+      mqttConnected = (e.data === '1');
+      renderConnStatus();
+    }, false);
     es.addEventListener('telemetry', function(e) {
+      if (!webSettings.debugEnabled) return;
       try { var t=JSON.parse(e.data); updateBadges(t); updateChart(t); } catch(err){}
     }, false);
+  }
+
+  function applyWebSettings() {
+    var dbgBtn = document.querySelector(".tab[data-tab='debug']");
+    var dbgPage = document.getElementById('page-debug');
+    if (dbgBtn && dbgPage) {
+      if (!webSettings.debugCompiled) {
+        dbgBtn.style.display = 'none';
+        dbgPage.style.display = 'none';
+        if (currentTab === 'debug') setTab('messages');
+      } else {
+        dbgBtn.style.display = '';
+        dbgPage.style.display = '';
+      }
+    }
+    var dbgToggle = document.getElementById('debugEnableToggle');
+    var dbgHint = document.getElementById('debugCompiledHint');
+    if (dbgToggle) {
+      dbgToggle.checked = !!webSettings.debugEnabled;
+      dbgToggle.disabled = !webSettings.debugCompiled;
+    }
+    if (dbgHint) {
+      dbgHint.textContent = webSettings.debugCompiled ? '' : 'Debug nicht einkompiliert (WITH_WEB_DEBUG fehlt).';
+    }
+    var liveToggle = document.getElementById('liveUiToggle');
+    if (liveToggle) liveToggle.checked = !!webSettings.liveUiEnabled;
+    var telnetToggle = document.getElementById('telnetToggle');
+    if (telnetToggle) telnetToggle.checked = !!webSettings.telnetEnabled;
+    var otaToggle = document.getElementById('otaToggle');
+    if (otaToggle) otaToggle.checked = !!webSettings.otaEnabled;
+    var otaHint = document.getElementById('otaWindowHint');
+    if (otaHint) {
+      otaHint.textContent = webSettings.otaEnabled
+        ? ('OTA aktiv, Restfenster: ' + (webSettings.otaWindowSec || 0) + 's')
+        : 'OTA inaktiv';
+    }
+    var intervalSel = document.getElementById('intervalSelect');
+    if (intervalSel) {
+      var sec = parseInt(webSettings.intervalSec || 1, 10);
+      if (intervalChoices.indexOf(sec) < 0) sec = 1;
+      intervalSel.value = String(sec);
+    }
+  }
+
+  function loadWebSettings() {
+    return fetch('/api/web-settings')
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        webSettings = d || webSettings;
+        applyWebSettings();
+      })
+      .catch(function(e){ console.log('web settings failed', e); });
+  }
+
+  function postWebSettings(body) {
+    return fetch('/api/web-settings', {
+      method: 'POST',
+      headers: {'Content-Type':'application/x-www-form-urlencoded'},
+      body: body
+    }).then(function(r){ return r.json(); })
+      .then(function(d){
+        if (!d || !d.ok) throw new Error('save failed');
+        webSettings = d;
+        applyWebSettings();
+      });
+  }
+
+  function setDebugEnabled(enabled) {
+    postWebSettings('debug=' + (enabled ? '1' : '0'))
+      .catch(function(e){
+        console.log('debug toggle failed', e);
+        applyWebSettings();
+      });
+  }
+
+  function setLiveUiEnabled(enabled) {
+    postWebSettings('live=' + (enabled ? '1' : '0'))
+      .catch(function(e){
+        console.log('live toggle failed', e);
+        applyWebSettings();
+      });
+  }
+
+  function setTelnetEnabled(enabled) {
+    postWebSettings('telnet=' + (enabled ? '1' : '0'))
+      .catch(function(e){
+        console.log('telnet toggle failed', e);
+        applyWebSettings();
+      });
+  }
+
+  function setOtaEnabled(enabled) {
+    postWebSettings('ota=' + (enabled ? '1' : '0'))
+      .catch(function(e){
+        console.log('ota toggle failed', e);
+        applyWebSettings();
+      });
+  }
+
+  function setUiInterval(sec) {
+    var n = parseInt(sec, 10);
+    if (intervalChoices.indexOf(n) < 0) {
+      applyWebSettings();
+      return;
+    }
+    postWebSettings('interval=' + encodeURIComponent(n))
+      .catch(function(e){
+        console.log('interval update failed', e);
+        applyWebSettings();
+      });
   }
 
   // ── Message handler ───────────────────────────────────────────────
@@ -99,7 +242,7 @@ const char index_html[] PROGMEM = R"=====(
   function handleMessage(obj) {
     Q.push(obj);
     renderMessageTable();
-    if (obj.cmd === 'C_SET') {
+    if (obj.cmd === 'C_SET' && obj.accepted === 1) {
       var nid = String(obj.sender), sid = String(obj.sensor);
       if (!sensorState[nid]) sensorState[nid] = {};
       sensorState[nid][sid] = { value: obj.payload, time: obj.time, type: obj.msgtype };
@@ -172,10 +315,9 @@ const char index_html[] PROGMEM = R"=====(
 
   // ── Telemetry badges & chart ──────────────────────────────────────
   function updateBadges(t) {
-    var conn = document.getElementById('connStatus');
     if (t && t.ctrlType === 'mqtt') {
-      conn.textContent = t.ctrlUp ? 'MQTT ●' : 'MQTT ○';
-      conn.className = t.ctrlUp ? 'conn-status conn-ok' : 'conn-status conn-err';
+      mqttConnected = !!t.ctrlUp;
+      renderConnStatus();
     }
     document.getElementById('wifiBadge').textContent  = 'WiFi: '+(t.wifi||'?');
     document.getElementById('rssiBadge').textContent  = 'RSSI: '+t.rssi+' dBm';
@@ -262,6 +404,7 @@ const char index_html[] PROGMEM = R"=====(
     setTab('messages');
     loadSensorState();
     startEvents();
+    loadWebSettings();
     loadNodeNames();
     setLogLevel('info');
   }
@@ -275,7 +418,7 @@ const char index_html[] PROGMEM = R"=====(
   <div class="nav-tabs">
     <button class="tab" data-tab="messages" onclick="setTab('messages')">&#128233; <span class="lbl">Messages</span></button>
     <button class="tab" data-tab="sensors"  onclick="setTab('sensors')">&#128202; <span class="lbl">Sensors</span></button>
-    <button class="tab" data-tab="nodes"    onclick="setTab('nodes')">&#127991; <span class="lbl">Nodes</span></button>
+    <button class="tab" data-tab="nodes"    onclick="setTab('nodes')">&#9881; <span class="lbl">Settings</span></button>
     <button class="tab" data-tab="info"     onclick="setTab('info')">&#8505; <span class="lbl">Info</span></button>
     <button class="tab" data-tab="debug"    onclick="setTab('debug')">&#128295; <span class="lbl">Debug</span></button>
   </div>
@@ -320,7 +463,6 @@ const char index_html[] PROGMEM = R"=====(
   <!-- ── Info ─────────────────────────────────────────── -->
   <div id="page-info" class="page">
     <div id="infoContent"></div>
-    <div id="gwClientsContent"></div>
     <div class="action-row">
       <button class="btn" onclick="doReboot()">&#128260; Reboot</button>
       <a href="/reconnect" class="btn btn-secondary">&#128268; Reconnect</a>
@@ -330,8 +472,30 @@ const char index_html[] PROGMEM = R"=====(
     </div>
   </div>
 
-  <!-- ── Nodes ────────────────────────────────────────── -->
+  <!-- ── Settings ─────────────────────────────────────── -->
   <div id="page-nodes" class="page">
+    <h2 class="section-title">Settings</h2>
+    <div class="settings-stack" style="margin-bottom:8px">
+      <label>WebUI Update Intervall
+        <select id="intervalSelect" onchange="setUiInterval(this.value)">
+          <option value="1">1s</option>
+          <option value="2">2s</option>
+          <option value="5">5s</option>
+          <option value="10">10s</option>
+          <option value="15">15s</option>
+          <option value="20">20s</option>
+          <option value="30">30s</option>
+          <option value="45">45s</option>
+          <option value="60">60s</option>
+        </select>
+      </label>
+      <label><input id="debugEnableToggle" type="checkbox" onchange="setDebugEnabled(this.checked)"> Debugging aktivieren</label>
+      <label><input id="liveUiToggle" type="checkbox" onchange="setLiveUiEnabled(this.checked)"> Info-Stats aktivieren</label>
+      <label><input id="telnetToggle" type="checkbox" onchange="setTelnetEnabled(this.checked)"> Telnet aktivieren</label>
+      <label><input id="otaToggle" type="checkbox" onchange="setOtaEnabled(this.checked)"> OTA aktivieren (10min): <span id="otaWindowHint">OTA inaktiv</span></label>
+    </div>
+    <div id="debugCompiledHint" style="color:#b45309;margin-bottom:8px"></div>
+
     <h2 class="section-title">Node-Namen</h2>
     <div class="form-row">
       <input id="nodeId"   type="text" placeholder="ID (0-255)" style="width:100px">

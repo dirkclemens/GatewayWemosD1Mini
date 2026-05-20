@@ -2,10 +2,10 @@
 
 ## 1. Projektüberblick
 
-`GatewayWemosD1Mini2026` ist ein MySensors-WLAN-Gateway für ESP8266 (primär Wemos D1 mini), das RF24-Funksensordaten ins IP-Netz überführt und eine lokale Betriebs-/Diagnoseoberfläche bereitstellt.
+`GatewayWemosD1Mini2026` ist ein MySensors-WLAN-Gateway für ESP8266 (Wemos D1 mini/D1 mini Pro) und optional ESP32, das RF24-Funksensordaten ins IP-Netz überführt und eine lokale Betriebs-/Diagnoseoberfläche bereitstellt.
 
 Hauptfunktionen:
-- MySensors Gateway (ESP8266, RF24)
+- MySensors Gateway (ESP8266/ESP32, RF24)
 - Web-Oberfläche mit Server-Sent Events (Live-Updates)
 - Telnet-Ausgabe für Live-Logs
 - OTA-Update-Unterstützung
@@ -16,16 +16,20 @@ Hauptfunktionen:
 
 ## 2. Hardware- und Software-Basis
 
-- MCU: ESP8266 (80 MHz)
+- MCU:
+  - ESP8266 (80 MHz)
+  - ESP32 (bei aktivem Build-Flag `USE_ESP32`)
 - Zielboards:
   - `d1_mini` (4 MB Flash)
   - `d1_mini_pro` (16 MB Flash)
+  - `esp32dev` (Environment `esp32_devkitc_serial` / `esp32_devkitc_ota`)
 - Funk: nRF24L01+ über `MY_RADIO_RF24`
 - Framework: Arduino
 - Buildsystem: PlatformIO
 
-Wichtige Plattformbindung:
-- `espressif8266@2.6.2` (in `platformio.ini` explizit fixiert)
+Wichtige Plattformbindungen:
+- ESP8266: `espressif8266@2.6.2` (kompatibilitätskritisch)
+- ESP32: `espressif32@6.10.0`
 
 ## 3. Build- und Deployment-Konfiguration
 
@@ -35,6 +39,8 @@ Datei: `platformio.ini`
 - `d1_mini_ota` (Default)
 - `d1_mini_serial`
 - `d1_mini_pro_serial`
+- `esp32_devkitc_serial`
+- `esp32_devkitc_ota`
 
 ### 3.2 Relevante Einstellungen
 - Dateisystem: `LittleFS`
@@ -113,15 +119,16 @@ Hinweis: Secrets sind korrekt aus dem Repository ausgelagert.
 5. Webserver initialisieren
 6. OTA initialisieren
 7. LittleFS mounten
-8. Statistiken initialisieren
-9. Bootzeit setzen
-10. Bootlog in `/bootlog.txt` fortschreiben
+8. Boot-/Restart-Metadaten laden/fortschreiben (`/boot_count.txt`, `/last_boot_epoch.txt`, `/last_restart_marker.txt`)
+9. Statistiken initialisieren
+10. Bootzeit setzen
+11. Bootlog in `/bootlog.txt` fortschreiben
 
 ### 6.3 Ablauf in `loop()`
 - CPU-Zykluszeit erfassen
 - Watchdog-freundliche `delay/yield`
 - Tageswechsel erkennen und Tageszähler zurücksetzen
-- WLAN-Reconnect, falls getrennt
+- WLAN-Reconnect, falls getrennt (zweistufige Recovery)
 - Webserver-/Telnet-/NTP-/OTA-Loopteile bedienen
 - Jede Sekunde:
   - Heap/Fragmentierung und Timingdaten erzeugen
@@ -132,6 +139,11 @@ Hinweis: Secrets sind korrekt aus dem Repository ausgelagert.
   - Heartbeat senden
   - Uptime senden
   - ARC-Statistik senden
+
+WLAN-Recovery-Strategie:
+- Stage 1: nach 5 Minuten ohne WLAN wird der WiFi-Stack hart neu initialisiert.
+- Stage 2: bleibt WLAN danach weiterhin aus, wird nach dem Timeout-Fenster rebootet.
+- Geplante Neustarts werden als Marker persistiert und beim nächsten Boot ausgewertet.
 
 ## 7. MySensors-Integration
 
@@ -173,6 +185,13 @@ Implementierung: `src/WebServer.cpp`, UI-Assets in `src/index.h`, `src/style_css
   - `led`
   - `messagesjson`
 
+UI-Struktur (5 Tabs):
+- Messages
+- Sensors
+- Settings (inkl. Node-Namen und Laufzeit-Settings)
+- Info
+- Debug
+
 ### 8.2 Endpunkte
 - `GET /`:
   - Hauptseite (Live-Messages + Info-Tab)
@@ -182,6 +201,8 @@ Implementierung: `src/WebServer.cpp`, UI-Assets in `src/index.h`, `src/style_css
   - komprimierte Assets aus PROGMEM
 - `GET /stats`:
   - Textstatus mit System-, WLAN-, Flash-, Heap-, FS- und Bootlog-Informationen
+- `GET /healthz`:
+  - JSON-Status inkl. `boot_count`, `reset_reason`, `reset_reason_raw`, `planned_restart_marker`, Heap, WiFi, RSSI
 - `GET /bootlog.txt`:
   - Inhalt des Bootlogs aus LittleFS
 - `GET /wipe`:
@@ -190,16 +211,26 @@ Implementierung: `src/WebServer.cpp`, UI-Assets in `src/index.h`, `src/style_css
   - WLAN-Reconnect
 - `POST /reboot`:
   - setzt Reboot-Flag, tatsächlicher Reboot erfolgt im Loop
+- `GET /api/web-settings`, `POST /api/web-settings`:
+  - Laufzeit-Settings (Debug, Live-Updates, Telnet, OTA, UI-Intervall)
+- `GET /api/node-names`, `POST /api/node-name`:
+  - Node-Namen lesen/schreiben
+- `GET /api/sensor-state`:
+  - Letzte Sensorwerte für den Sensor-Tab
 
 ### 8.3 Frontend-Verhalten
 - EventSource empfängt Live-Daten
 - `messagesjson` wird in eine tabellarische Ansicht umgewandelt
 - Ringpuffer (JavaScript CircularQueue) für die letzten 30 Meldungen
+- Die Info-Ansicht ist konsolidiert: MQTT-/Client-Infos werden direkt in den Info-Block integriert (kein separater Clients-Bereich)
 
 ## 9. Dateisystem (LittleFS)
 
 Verwendung:
 - Persistentes Bootlog: `/bootlog.txt`
+- Bootzähler: `/boot_count.txt`
+- Letzter Bootzeitpunkt: `/last_boot_epoch.txt`
+- Persistenter Restart-Marker: `/last_restart_marker.txt`
 - Diagnoseausgabe via `/stats`
 - Lesen/Löschen via Web-Endpunkte
 
@@ -256,14 +287,14 @@ Regelmäßig publiziert:
 
 ## 14. Bekannte technische Auffälligkeiten
 
-- In `setup()` wird eine lokale Variable `rst_info *resetInfo` verwendet, während andere Funktionen ebenfalls auf `resetInfo` zugreifen; das ist wartungstechnisch fehleranfällig.
-- In Debug-Ausgaben werden teilweise Formatstrings/Argumente nicht konsistent übergeben (z. B. Pushover-Resultat-Log), funktional meist unkritisch, aber für klare Logs optimierbar.
+- Das Projekt unterstützt zwei Zielplattformen (ESP8266/ESP32). Nicht jedes Feature ist auf beiden Plattformen identisch tief instrumentiert.
+- Bei sehr großer Info-/Debug-Ausgabe kann die UI-Last steigen; daher sind Live-Updates und Debug einzeln schaltbar.
 - Einige Texte sind gemischt Deutsch/Englisch; für Teamwartung wäre einheitliche Sprache sinnvoll.
 
 ## 15. Empfohlene nächste Schritte
 
 1. `credentials.h`-Pfad vereinheitlichen (z. B. über Build-Flags/Include-Pfad), um Portabilität zu erhöhen.
-2. Reset-Info-Handling konsolidieren (globale, eindeutig initialisierte Struktur).
-3. Optional: Web-UI und Asset-Quellen (`data/static` vs. PROGMEM-Headers) mit einem klaren Build-Generierungsprozess dokumentieren.
-4. Optional: Kleine Tests/Checks für ARC-Reporting, Bootlog-Rotation und Heap-Alarm ergänzen.
+2. Optional: Web-UI und Asset-Quellen (`data/static` vs. PROGMEM-Headers) mit einem klaren Build-Generierungsprozess dokumentieren.
+3. Optional: Kleine Tests/Checks für ARC-Reporting, Bootlog-Rotation und Heap-Alarm ergänzen.
+4. Optional: Crash-Backtrace-Dekodierung als festen Wartungsablauf (inkl. Script) dokumentieren.
 
