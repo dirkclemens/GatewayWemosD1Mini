@@ -38,7 +38,8 @@ static char gResetReasonRaw[128] = {'\0'};
 static char gLastRestartMarker[160] = {'\0'};
 static bool gNtpSynced = false;
 static bool gWebDebugEnabled = false;
-static bool gWebLiveUiEnabled = false;
+static bool gWebLiveUiEnabled = true;
+static const int UI_RSSI_MIN_DBM = -85;
 
 static const uint16_t SENSOR_STATE_SLOTS = 256;
 struct SensorStateEntry {
@@ -363,7 +364,7 @@ static void sendSensorStateJson(AsyncWebServerRequest *request)
 	request->send(resp);
 }
 
-static void appendFsListing(AsyncResponseStream *resp, bool asJson)
+static void appendFsListing(AsyncResponseStream *resp, bool asJson, size_t maxEntries = 0)
 {
 	File root = GATEWAY_FS.open("/");
 	if (!root || !root.isDirectory()) {
@@ -371,7 +372,19 @@ static void appendFsListing(AsyncResponseStream *resp, bool asJson)
 	}
 	File file = root.openNextFile();
 	bool first = true;
+	size_t count = 0;
 	while (file) {
+		if (maxEntries > 0 && count >= maxEntries) {
+			if (asJson) {
+				if (!first) {
+					resp->print(",");
+				}
+				resp->print("{\"path\":\"...\",\"size\":0}");
+			} else {
+				resp->print("... file listing truncated\n");
+			}
+			break;
+		}
 		if (asJson) {
 			if (!first) {
 				resp->print(",");
@@ -385,6 +398,7 @@ static void appendFsListing(AsyncResponseStream *resp, bool asJson)
 			resp->printf("FS File: %s, size: %s\n", file.name(), szBuf);
 		}
 		first = false;
+		count++;
 		file = root.openNextFile();
 	}
 }
@@ -633,6 +647,14 @@ const char *getNodeNameById(uint8_t nodeId)
 
 void send_Status(AsyncWebServerRequest *request)
 {
+	static const size_t STATUS_MAX_BOOTLOG_LINES = 30;
+	static const size_t STATUS_MAX_BOOTLOG_BYTES = 3072;
+	static const size_t STATUS_MAX_FILE_ENTRIES = 80;
+	static const size_t STATUS_LINE_BUF_SIZE = 192;
+	const bool includeDetails =
+		request && request->hasParam("full") &&
+		trimCopy(request->getParam("full")->value()) == "1";
+
 	uint32_t realSize = ESP.getFlashChipSize();
 	uint32_t ideSize = ESP.getFlashChipSize();
 	uint8_t heapFragmentation = getHeapFragmentationPct();
@@ -665,33 +687,92 @@ void send_Status(AsyncWebServerRequest *request)
 	resp->printf("        mac address: %s\n", WiFi.macAddress().c_str());
 		resp->printf("               rssi: %d\n", WiFi.RSSI());
 	resp->println();
+	resp->printf("details: %s (use /stats?full=1 for FS+bootlog)\n", includeDetails ? "enabled" : "disabled");
+	resp->println();
 
-	boolean fsOk = gatewayFsBegin();
-	if (fsOk) 
-	{	
-		resp->print ("Filesystem\n-----------------------------\n");
-		resp->printf("      FS totalBytes: %lu bytes\n", static_cast<unsigned long>(GATEWAY_FS.totalBytes()));
-		resp->printf("      FS  usedBytes: %lu bytes\n", static_cast<unsigned long>(GATEWAY_FS.usedBytes()));
-		resp->println();
+	if (includeDetails) {
+		boolean fsOk = gatewayFsBegin();
+		if (fsOk)
+		{
+			resp->print ("Filesystem\n-----------------------------\n");
+			resp->printf("      FS totalBytes: %lu bytes\n", static_cast<unsigned long>(GATEWAY_FS.totalBytes()));
+			resp->printf("      FS  usedBytes: %lu bytes\n", static_cast<unsigned long>(GATEWAY_FS.usedBytes()));
+			resp->println();
 
-		resp->print ("Files\n-----------------------------\n");
-		appendFsListing(resp, false);
-		resp->println();
+			resp->print ("Files\n-----------------------------\n");
+			appendFsListing(resp, false, STATUS_MAX_FILE_ENTRIES);
+			resp->println();
 
-		resp->print ("Bootlog\n-----------------------------\n");
-		File file = GATEWAY_FS.open("/bootlog.txt", "r");
-		while (file.available()) {
-			resp->printf("%s\n", file.readStringUntil('\n').c_str());
-			// resp->printf("%s\n", file.readString().c_str());
+			resp->print ("Bootlog\n-----------------------------\n");
+			File file = GATEWAY_FS.open("/bootlog.txt", "r");
+			if (file && !file.isDirectory()) {
+				size_t lines = 0;
+				size_t writtenBytes = 0;
+				char lineBuf[STATUS_LINE_BUF_SIZE];
+				while (file.available() && lines < STATUS_MAX_BOOTLOG_LINES && writtenBytes < STATUS_MAX_BOOTLOG_BYTES) {
+					size_t n = file.readBytesUntil('\n', lineBuf, STATUS_LINE_BUF_SIZE - 1);
+					lineBuf[n] = '\0';
+					resp->printf("%s\n", lineBuf);
+					writtenBytes += n + 1;
+					lines++;
+				}
+				if (file.available()) {
+					resp->printf("... bootlog truncated (%u lines / %u bytes limit)\n",
+								 static_cast<unsigned>(STATUS_MAX_BOOTLOG_LINES),
+								 static_cast<unsigned>(STATUS_MAX_BOOTLOG_BYTES));
+				}
+				file.close();
+			} else {
+				resp->print("bootlog not available\n");
+			}
 		}
-		// bootloglines += String(file.size()) + " Bytes";
-		file.close();
-	} 
-	else
-	{
-		resp->printf("error opening filesystem!\n");
-		dbgprintln(ico_error, "error: reading from filesystem.");	
+		else
+		{
+			resp->printf("error opening filesystem!\n");
+			dbgprintln(ico_error, "error: reading from filesystem.");
+		}
 	}
+
+	request->send(resp);
+}
+
+static void send_StatusMini(AsyncWebServerRequest *request)
+{
+	if (!request) {
+		return;
+	}
+
+	const bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+	const int rssi = WiFi.RSSI();
+	const bool weakLink = (!wifiConnected || rssi < UI_RSSI_MIN_DBM);
+	char nowStr[22] = {'\0'};
+	getCurrentTimeString(nowStr, sizeof(nowStr), "%Y-%m-%d %H:%M:%S");
+
+	AsyncResponseStream *resp = request->beginResponseStream("text/html");
+	resp->print("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Gateway Mini</title></head><body style=\"font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:14px;line-height:1.35\">");
+	resp->print("<h3 style=\"margin:0 0 10px 0\">Gateway Mini Status</h3>");
+	if (weakLink) {
+		resp->printf("<p style=\"margin:0 0 10px 0;color:#9a5a00;background:#fff6e5;border:1px solid #f0d9a8;padding:8px;border-radius:6px\">Schwache WLAN-Verbindung erkannt (RSSI %d dBm, Schwellwert %d dBm). Mini-Ansicht wird empfohlen.</p>",
+					 rssi,
+					 UI_RSSI_MIN_DBM);
+	}
+	resp->print("<p style=\"margin:0 0 12px 0\"><a href=\"/ui\">Volle UI laden</a> | <a href=\"/stats\">Stats</a> | <a href=\"/stats?full=1\">Stats full</a> | <a href=\"/healthz\">Health</a></p>");
+	resp->print("<pre style=\"white-space:pre-wrap;background:#f7f7f7;border:1px solid #ddd;padding:10px;border-radius:6px;margin:0\">");
+	resp->printf("host: %s\n", getWifiHostname().c_str());
+	resp->printf("time: %s\n", nowStr);
+	resp->printf("uptime: %s\n", uptime());
+	resp->printf("runtime: %s\n", runtime());
+	resp->printf("build: %s %s\n", __DATE__, __TIME__);
+	resp->printf("sw version: %s\n\n", __SWVERSION__);
+	resp->printf("wifi connected: %s\n", wifiConnected ? "yes" : "no");
+	resp->printf("wifi status: %d\n", static_cast<int>(WiFi.status()));
+	resp->printf("ip: %s\n", WiFi.localIP().toString().c_str());
+	resp->printf("ssid: %s\n", WiFi.SSID().c_str());
+	resp->printf("rssi: %d\n\n", rssi);
+	resp->printf("heap: %lu bytes\n", static_cast<unsigned long>(ESP.getFreeHeap()));
+	resp->printf("heap fragmentation: %u %%\n", static_cast<unsigned>(getHeapFragmentationPct()));
+	resp->printf("max free block: %u bytes\n", static_cast<unsigned>(getMaxFreeBlockBytes()));
+	resp->print("</pre></body></html>");
 
 	request->send(resp);
 }
@@ -803,17 +884,26 @@ void setup_WebServer()
 	server.on("/api/web-settings", HTTP_GET, [](AsyncWebServerRequest *request){
 		const unsigned long intervalSec = static_cast<unsigned long>(getUiUpdateIntervalMs() / 1000UL);
 		const unsigned long otaWindowSec = static_cast<unsigned long>(getOtaWindowRemainingSec());
-		char json[288] = {'\0'};
+		const unsigned long bootlogMax = static_cast<unsigned long>(getBootLogMaxEntries());
+		const unsigned long authFailBackoffSec = static_cast<unsigned long>(getWifiAuthFailBackoffMs() / 1000UL);
+		const unsigned long authFailBackoffThreshold = static_cast<unsigned long>(getWifiAuthFailBackoffThreshold());
+		char json[576] = {'\0'};
 		snprintf(json, sizeof(json),
 				 "{\"debugCompiled\":%s,\"debugEnabled\":%s,\"liveUiEnabled\":%s,\"telnetEnabled\":%s,"
-				 "\"otaEnabled\":%s,\"otaWindowSec\":%lu,\"intervalSec\":%lu}",
+				 "\"otaEnabled\":%s,\"otaWindowSec\":%lu,\"intervalSec\":%lu,"
+				 "\"wifiBssidLocked\":%s,\"wifiBssid\":\"%s\",\"bootlogMax\":%lu,\"wifiAuthFailBackoffSec\":%lu,\"wifiAuthFailBackoffThreshold\":%lu}",
 				 isWebDebugCompiled() ? "true" : "false",
 				 isWebDebugEnabled() ? "true" : "false",
 				 isWebLiveUiEnabled() ? "true" : "false",
 				 isTelnetRuntimeEnabled() ? "true" : "false",
 				 isOtaRuntimeEnabled() ? "true" : "false",
 				 otaWindowSec,
-				 intervalSec);
+				 intervalSec,
+				 isWifiRepeaterBssidLocked() ? "true" : "false",
+				 getWifiRepeaterBssid(),
+				 bootlogMax,
+				 authFailBackoffSec,
+				 authFailBackoffThreshold);
 		request->send(200, "application/json", json);
 	});
 
@@ -845,19 +935,59 @@ void setup_WebServer()
 				setUiUpdateIntervalMs(static_cast<uint32_t>(sec) * 1000UL);
 			}
 		}
+		if (request->hasParam("wifiBssid", true)) {
+			const String v = trimCopy(request->getParam("wifiBssid", true)->value());
+			if (!setWifiRepeaterBssid(v)) {
+				request->send(400, "application/json", "{\"ok\":false,\"error\":\"invalid BSSID format, expected XX:XX:XX:XX:XX:XX\"}");
+				return;
+			}
+		}
+		if (request->hasParam("bootlogMax", true)) {
+			const String v = trimCopy(request->getParam("bootlogMax", true)->value());
+			const long n = v.toInt();
+			if (n <= 0 || !setBootLogMaxEntries(static_cast<uint32_t>(n))) {
+				request->send(400, "application/json", "{\"ok\":false,\"error\":\"invalid bootlogMax, allowed range 50..500\"}");
+				return;
+			}
+		}
+		if (request->hasParam("wifiAuthFailBackoffSec", true)) {
+			const String v = trimCopy(request->getParam("wifiAuthFailBackoffSec", true)->value());
+			const long sec = v.toInt();
+			if (sec <= 0 || !setWifiAuthFailBackoffMs(static_cast<uint32_t>(sec) * 1000UL)) {
+				request->send(400, "application/json", "{\"ok\":false,\"error\":\"invalid wifiAuthFailBackoffSec, allowed range 5..300\"}");
+				return;
+			}
+		}
+		if (request->hasParam("wifiAuthFailBackoffThreshold", true)) {
+			const String v = trimCopy(request->getParam("wifiAuthFailBackoffThreshold", true)->value());
+			const long threshold = v.toInt();
+			if (threshold <= 0 || !setWifiAuthFailBackoffThreshold(static_cast<uint32_t>(threshold))) {
+				request->send(400, "application/json", "{\"ok\":false,\"error\":\"invalid wifiAuthFailBackoffThreshold, allowed range 2..20\"}");
+				return;
+			}
+		}
 		const unsigned long intervalSec = static_cast<unsigned long>(getUiUpdateIntervalMs() / 1000UL);
 		const unsigned long otaWindowSec = static_cast<unsigned long>(getOtaWindowRemainingSec());
-		char json[288] = {'\0'};
+		const unsigned long bootlogMax = static_cast<unsigned long>(getBootLogMaxEntries());
+		const unsigned long authFailBackoffSec = static_cast<unsigned long>(getWifiAuthFailBackoffMs() / 1000UL);
+		const unsigned long authFailBackoffThreshold = static_cast<unsigned long>(getWifiAuthFailBackoffThreshold());
+		char json[608] = {'\0'};
 		snprintf(json, sizeof(json),
 				 "{\"ok\":true,\"debugCompiled\":%s,\"debugEnabled\":%s,\"liveUiEnabled\":%s,\"telnetEnabled\":%s,"
-				 "\"otaEnabled\":%s,\"otaWindowSec\":%lu,\"intervalSec\":%lu}",
+				 "\"otaEnabled\":%s,\"otaWindowSec\":%lu,\"intervalSec\":%lu,"
+				 "\"wifiBssidLocked\":%s,\"wifiBssid\":\"%s\",\"bootlogMax\":%lu,\"wifiAuthFailBackoffSec\":%lu,\"wifiAuthFailBackoffThreshold\":%lu}",
 				 isWebDebugCompiled() ? "true" : "false",
 				 isWebDebugEnabled() ? "true" : "false",
 				 isWebLiveUiEnabled() ? "true" : "false",
 				 isTelnetRuntimeEnabled() ? "true" : "false",
 				 isOtaRuntimeEnabled() ? "true" : "false",
 				 otaWindowSec,
-				 intervalSec);
+				 intervalSec,
+				 isWifiRepeaterBssidLocked() ? "true" : "false",
+				 getWifiRepeaterBssid(),
+				 bootlogMax,
+				 authFailBackoffSec,
+				 authFailBackoffThreshold);
 		request->send(200, "application/json", json);
 	});
 
@@ -892,7 +1022,7 @@ void setup_WebServer()
 		if (!request->hasParam("path")) {
 			AsyncResponseStream *resp = request->beginResponseStream("application/json");
 			resp->print("{\"ok\":true,\"files\":[");
-			appendFsListing(resp, true);
+			appendFsListing(resp, true, 300);
 			resp->print("]}");
 			request->send(resp);
 			return;
@@ -927,15 +1057,28 @@ void setup_WebServer()
 	});
 
 
-	server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+	server.on("/ui", HTTP_GET, [](AsyncWebServerRequest *request){
 		AsyncWebServerResponse *response = request->beginResponse_P(200, "text/html", index_html, nullptr);
 		response->addHeader("Server", getWifiHostname().c_str());
 		request->send(response);
-		// request->send_P(200, "text/html", index_html, processor);
+	});
+
+	server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+		const bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+		const int rssi = WiFi.RSSI();
+		if (!wifiConnected || rssi < UI_RSSI_MIN_DBM) {
+			request->redirect("/mini");
+			return;
+		}
+		request->redirect("/ui");
 	});	
 
 	server.on("/stats", [](AsyncWebServerRequest *request) {
 		send_Status(request);
+	});
+
+	server.on("/mini", HTTP_GET, [](AsyncWebServerRequest *request) {
+		send_StatusMini(request);
 	});
 
 	server.on("/healthz", HTTP_GET, [](AsyncWebServerRequest *request) {

@@ -1,6 +1,6 @@
-# GatewayWemosD1Mini
+# GatewayESP32
 
-MySensors WiFi Gateway auf Basis des **Wemos D1 Mini (ESP8266)** mit moderner Web-UI, Telnet-Interface und Pushover-Benachrichtigungen.
+MySensors WiFi Gateway auf Basis eines **ESP32 DevKit (ESP32-WROOM)** mit moderner Web-UI, Telnet-Interface und Pushover-Benachrichtigungen.
 
 Version: **2.4.1**
 
@@ -45,7 +45,7 @@ Die Web-Oberfläche ist über `http://<gateway-ip>/` erreichbar und enthält fü
 
 ### Sensor-Tab
 
-Alle eingehenden `C_SET`-Nachrichten werden im Browser-Speicher der aktuellen Session gehalten. Beim Wechsel zwischen Tabs bleiben die Daten erhalten. Es werden keine Messwerte auf dem ESP8266 gespeichert.
+Alle eingehenden `C_SET`-Nachrichten werden im Browser-Speicher der aktuellen Session gehalten. Beim Wechsel zwischen Tabs bleiben die Daten erhalten. Es werden keine Messwerte auf dem Gateway gespeichert.
 
 ## Konfiguration
 
@@ -73,22 +73,28 @@ Feature-Flags in `src/config.h`:
 **PlatformIO** (empfohlen):
 
 ```bash
-pio run                          # kompilieren
-pio run -t upload                # seriell flashen
-pio run -e d1_mini_ota -t upload # OTA flashen
+pio run -e esp32_devkitc_serial_release
+pio run -e esp32_devkitc_serial_release -t upload
+pio run -e esp32_devkitc_ota_release -t upload
 ```
 
-ESP32 (serielle Umgebung):
+ESP32 (Debug-Profil):
 
 ```bash
-pio run -e esp32_devkitc_serial
-pio run -e esp32_devkitc_serial -t upload
+pio run -e esp32_devkitc_serial_debug
+pio run -e esp32_devkitc_serial_debug -t upload
+```
+
+ESP32 (OTA Debug-Profil):
+
+```bash
+pio run -e esp32_devkitc_ota_debug -t upload
 ```
 
 **OTA manuell:**
 
 ```bash
-python espota.py -d -i 192.168.x.x -f .pio/build/d1_mini_ota/firmware.bin
+python espota.py -d -i 192.168.x.x -f .pio/build/esp32_devkitc_ota_release/firmware.bin
 ```
 
 **Seriell (esptool):**
@@ -102,9 +108,15 @@ ls /dev/cu.*
 
 | Umgebung | Beschreibung |
 |----------|-------------|
-| `d1_mini_ota` | Wemos D1 Mini, OTA-Upload (Standard) |
-| `d1_mini_serial` | Wemos D1 Mini, serieller Upload |
-| `d1_mini_pro_serial` | Wemos D1 Mini Pro, serieller Upload |
+| `esp32_devkitc_serial_release` | ESP32 DevKitC, seriell, optimierter Release-Build (Standard) |
+| `esp32_devkitc_serial_debug` | ESP32 DevKitC, seriell, Debug-Build mit `MY_DEBUG` |
+| `esp32_devkitc_ota_release` | ESP32 DevKitC, OTA, optimierter Release-Build |
+| `esp32_devkitc_ota_debug` | ESP32 DevKitC, OTA, Debug-Build mit `MY_DEBUG` |
+
+Kompatibilitäts-Aliase (zeigen auf Release):
+
+- `esp32_devkitc_serial` -> `esp32_devkitc_serial_release`
+- `esp32_devkitc_ota` -> `esp32_devkitc_ota_release`
 
 ## Monitoring / Crash-Erkennung
 
@@ -167,7 +179,7 @@ HB_BIND_HOST=192.168.2.222 HB_BIND_PORT=18080 python3 tools/heartbeat_server.py
 Verfügbare Endpoints:
 
 - `POST /mysensors/heartbeat` (vom ESP)
-- `GET /mysensors/heartbeat/latest?host=GatewayWemosD1Mini`
+- `GET /mysensors/heartbeat/latest?host=GatewayESP32Wroom`
 - `GET /mysensors/heartbeat/history?limit=50`
 - `GET /healthz`
 
@@ -181,7 +193,7 @@ sudo cp tools/mysensors-heartbeat.service /etc/systemd/system/
 sudo cp tools/mysensors-heartbeat.env.example /etc/default/mysensors-heartbeat
 ```
 
-Dann in `/etc/systemd/system/mysensors-heartbeat.service` den Projektpfad (`/opt/GatewayWemosD1Mini`) anpassen.
+Dann in `/etc/systemd/system/mysensors-heartbeat.service` den Projektpfad (`/opt/GatewayESP32`) anpassen.
 
 ```bash
 sudo systemctl daemon-reload
@@ -229,34 +241,21 @@ exit 0
 | TX | gelb | Blinkt bei gesendeter Funknachricht |
 | ERR | rot | Blinkt schnell bei Übertragungsfehler/CRC-Fehler |
 
-### nRF24L01+ Verkabelung
+### nRF24L01+ Verkabelung (ESP32)
 
-| nRF24L01+ | ESP8266 | Wemos D1 mini | Hinweis |
-|-----------|---------|---------------|---------|
-| VCC | VCC | VCC | |
-| CE | GPIO4 | D2 | |
-| CSN/CS | GPIO15 | D8 | 10K Pulldown nach GND |
-| SCK | GPIO14 | D5 | |
-| MISO | GPIO12 | D6 | |
-| MOSI | GPIO13 | D7 | |
-| GND | GND | GND | |
-| — | CH_PD | — | 10K Pullup nach VCC |
-| — | GPIO2 | D4 | 10K Pullup nach VCC |
-| — | GPIO0 | D3 | 10K Pullup nach VCC + Taster nach GND (Bootload) |
-| — | GPIO16 | D0 | frei |
-| — | GPIO5 | D1 | Taster nach GND (Inclusion Mode) |
-
-Für Bare-ESP-Module (z. B. ESP-12E): RST via 10K Pullup nach VCC + Taster nach GND.
-
-```cpp
-#define MY_DEFAULT_ERR_LED_PIN D10  // Error LED (Rot)
-#define MY_DEFAULT_RX_LED_PIN  D9   // Receive LED (Gelb)
-#define MY_DEFAULT_TX_LED_PIN  D1   // Transmit LED (Grün)
-```
+| nRF24L01+ | ESP32 GPIO | Hinweis |
+|-----------|------------|---------|
+| VCC | 3V3 | stabile 3.3V Versorgung verwenden |
+| GND | GND | gemeinsamer Massebezug |
+| CE | GPIO17 | entspricht `MY_RF24_CE_PIN` |
+| CSN/CS | GPIO5 | entspricht `MY_RF24_CS_PIN` |
+| SCK | GPIO18 | SPI SCK |
+| MISO | GPIO19 | SPI MISO |
+| MOSI | GPIO23 | SPI MOSI |
 
 ## Ressourcen
 
-- [MySensors ESP8266 Gateway](https://www.mysensors.org/build/esp8266_gateway)
+- [MySensors ESP32 Gateway](https://www.mysensors.org/build/esp32_gateway)
 - [MySensors Advanced Gateway](https://www.mysensors.org/build/advanced_gateway)
-- [Wemos D1 Mini](https://www.wemos.cc/product/d1-mini.html)
+- [ESP32 DevKitC](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/hw-reference/esp32/get-started-devkitc.html)
 - [ESPAsyncWebServer](https://github.com/me-no-dev/ESPAsyncWebServer)

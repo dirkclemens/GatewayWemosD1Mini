@@ -40,9 +40,29 @@ const char index_html[] PROGMEM = R"=====(
   var maxLogLines = 20, maxTelemetryPoints = 60;
   var logLevel = 'info', currentTab = 'messages';
   var intervalChoices = [1,2,5,10,15,20,30,45,60];
-  var webSettings = { debugCompiled: true, debugEnabled: false, liveUiEnabled: false, telnetEnabled: false, otaEnabled: false, otaWindowSec: 0, intervalSec: 1 };
+  var webSettings = { debugCompiled: true, debugEnabled: false, liveUiEnabled: true, telnetEnabled: false, otaEnabled: false, otaWindowSec: 0, intervalSec: 1, wifiBssidLocked: false, wifiBssid: '', bootlogMax: 200, wifiAuthFailBackoffSec: 60, wifiAuthFailBackoffThreshold: 5 };
   var sseConnected = false;
   var mqttConnected = null;
+
+  function parseInfoStat(html, key) {
+    if (!html || !key) return '';
+    var esc = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    var re = new RegExp('<tr><td>' + esc + '</td><td>([^<]*)</td></tr>', 'i');
+    var m = html.match(re);
+    return m && m[1] ? m[1] : '';
+  }
+
+  function updateInfoStatusLine(html) {
+    var t = parseInfoStat(html, 'current time') || '';
+    var u = parseInfoStat(html, 'runtime') || '';
+    var b = parseInfoStat(html, 'build') || '';
+    var tEl = document.getElementById('infoCurrentTimeVal');
+    var uEl = document.getElementById('infoUptimeVal');
+    var bEl = document.getElementById('infoBuildVal');
+    if (tEl) tEl.textContent = t;
+    if (uEl) uEl.textContent = u;
+    if (bEl) bEl.textContent = b;
+  }
 
   function renderConnStatus() {
     var el = document.getElementById('connStatus');
@@ -91,7 +111,9 @@ const char index_html[] PROGMEM = R"=====(
       if (webSettings.debugEnabled) appendLogLine('indicator', e.data, detectLevel(e.data));
     }, false);
     es.addEventListener('info', function(e){
-      if (webSettings.liveUiEnabled) document.getElementById('infoContent').innerHTML = e.data;
+      if (!webSettings.liveUiEnabled) return;
+      document.getElementById('infoContent').innerHTML = e.data;
+      updateInfoStatusLine(e.data);
     }, false);
     es.addEventListener('led', function(e){
       if (webSettings.debugEnabled) document.getElementById('ledStatus').innerHTML = e.data;
@@ -133,6 +155,11 @@ const char index_html[] PROGMEM = R"=====(
     }
     var liveToggle = document.getElementById('liveUiToggle');
     if (liveToggle) liveToggle.checked = !!webSettings.liveUiEnabled;
+    if (!webSettings.liveUiEnabled) {
+      var infoContent = document.getElementById('infoContent');
+      if (infoContent) infoContent.innerHTML = '';
+      updateInfoStatusLine('');
+    }
     var telnetToggle = document.getElementById('telnetToggle');
     if (telnetToggle) telnetToggle.checked = !!webSettings.telnetEnabled;
     var otaToggle = document.getElementById('otaToggle');
@@ -148,6 +175,44 @@ const char index_html[] PROGMEM = R"=====(
       var sec = parseInt(webSettings.intervalSec || 1, 10);
       if (intervalChoices.indexOf(sec) < 0) sec = 1;
       intervalSel.value = String(sec);
+    }
+    var bssidInput = document.getElementById('wifiBssidInput');
+    if (bssidInput) bssidInput.value = webSettings.wifiBssid || '';
+    var bssidHint = document.getElementById('wifiBssidHint');
+    if (bssidHint) {
+      bssidHint.textContent = webSettings.wifiBssidLocked
+        ? ('BSSID-Lock aktiv: ' + (webSettings.wifiBssid || '-'))
+        : 'BSSID-Lock inaktiv';
+    }
+    var bootlogInput = document.getElementById('bootlogMaxInput');
+    if (bootlogInput) {
+      var max = parseInt(webSettings.bootlogMax || 200, 10);
+      if (!isFinite(max) || max < 50 || max > 500) max = 200;
+      bootlogInput.value = String(max);
+    }
+    var bootlogHint = document.getElementById('bootlogMaxHint');
+    if (bootlogHint) {
+      bootlogHint.textContent = 'Bootlog-Historie: letzte ' + (webSettings.bootlogMax || 200) + ' Eintraege';
+    }
+    var authBackoffInput = document.getElementById('wifiAuthFailBackoffSecInput');
+    if (authBackoffInput) {
+      var sec = parseInt(webSettings.wifiAuthFailBackoffSec || 60, 10);
+      if (!isFinite(sec) || sec < 5 || sec > 300) sec = 60;
+      authBackoffInput.value = String(sec);
+    }
+    var authBackoffHint = document.getElementById('wifiAuthFailBackoffHint');
+    if (authBackoffHint) {
+      authBackoffHint.textContent = 'AUTH_FAIL Pause: ' + (webSettings.wifiAuthFailBackoffSec || 60) + 's';
+    }
+    var authThresholdInput = document.getElementById('wifiAuthFailBackoffThresholdInput');
+    if (authThresholdInput) {
+      var threshold = parseInt(webSettings.wifiAuthFailBackoffThreshold || 5, 10);
+      if (!isFinite(threshold) || threshold < 2 || threshold > 20) threshold = 5;
+      authThresholdInput.value = String(threshold);
+    }
+    var authThresholdHint = document.getElementById('wifiAuthFailBackoffThresholdHint');
+    if (authThresholdHint) {
+      authThresholdHint.textContent = 'AUTH_FAIL Schwellwert: ' + (webSettings.wifiAuthFailBackoffThreshold || 5);
     }
   }
 
@@ -215,6 +280,69 @@ const char index_html[] PROGMEM = R"=====(
     postWebSettings('interval=' + encodeURIComponent(n))
       .catch(function(e){
         console.log('interval update failed', e);
+        applyWebSettings();
+      });
+  }
+
+  function saveWifiBssid() {
+    var el = document.getElementById('wifiBssidInput');
+    if (!el) return;
+    var value = (el.value || '').trim();
+    postWebSettings('wifiBssid=' + encodeURIComponent(value))
+      .catch(function(e){
+        alert('BSSID konnte nicht gespeichert werden. Format: XX:XX:XX:XX:XX:XX');
+        console.log('wifi bssid update failed', e);
+        applyWebSettings();
+      });
+  }
+
+  function saveBootlogMax() {
+    var el = document.getElementById('bootlogMaxInput');
+    if (!el) return;
+    var value = parseInt((el.value || '').trim(), 10);
+    if (!isFinite(value) || value < 50 || value > 500) {
+      alert('Bootlog-Max muss zwischen 50 und 500 liegen.');
+      applyWebSettings();
+      return;
+    }
+    postWebSettings('bootlogMax=' + encodeURIComponent(value))
+      .catch(function(e){
+        alert('Bootlog-Max konnte nicht gespeichert werden (50..500).');
+        console.log('bootlog max update failed', e);
+        applyWebSettings();
+      });
+  }
+
+  function saveWifiAuthFailBackoffSec() {
+    var el = document.getElementById('wifiAuthFailBackoffSecInput');
+    if (!el) return;
+    var value = parseInt((el.value || '').trim(), 10);
+    if (!isFinite(value) || value < 5 || value > 300) {
+      alert('AUTH_FAIL-Backoff muss zwischen 5 und 300 Sekunden liegen.');
+      applyWebSettings();
+      return;
+    }
+    postWebSettings('wifiAuthFailBackoffSec=' + encodeURIComponent(value))
+      .catch(function(e){
+        alert('AUTH_FAIL-Backoff konnte nicht gespeichert werden (5..300s).');
+        console.log('auth fail backoff update failed', e);
+        applyWebSettings();
+      });
+  }
+
+  function saveWifiAuthFailBackoffThreshold() {
+    var el = document.getElementById('wifiAuthFailBackoffThresholdInput');
+    if (!el) return;
+    var value = parseInt((el.value || '').trim(), 10);
+    if (!isFinite(value) || value < 2 || value > 20) {
+      alert('AUTH_FAIL-Schwellwert muss zwischen 2 und 20 liegen.');
+      applyWebSettings();
+      return;
+    }
+    postWebSettings('wifiAuthFailBackoffThreshold=' + encodeURIComponent(value))
+      .catch(function(e){
+        alert('AUTH_FAIL-Schwellwert konnte nicht gespeichert werden (2..20).');
+        console.log('auth fail threshold update failed', e);
         applyWebSettings();
       });
   }
@@ -427,6 +555,12 @@ const char index_html[] PROGMEM = R"=====(
 
 <main>
 
+  <div id="infoStatusLine" class="info-status-line">
+    <div class="info-chip"><span class="k">Current Time</span><span class="v" id="infoCurrentTimeVal"></span></div>
+    <div class="info-chip"><span class="k">Uptime</span><span class="v" id="infoUptimeVal"></span></div>
+    <div class="info-chip"><span class="k">Build</span><span class="v" id="infoBuildVal"></span></div>
+  </div>
+
   <!-- ── Messages ─────────────────────────────────────── -->
   <div id="page-messages" class="page">
     <div class="msg-controls">
@@ -493,6 +627,34 @@ const char index_html[] PROGMEM = R"=====(
       <label><input id="liveUiToggle" type="checkbox" onchange="setLiveUiEnabled(this.checked)"> Info-Stats aktivieren</label>
       <label><input id="telnetToggle" type="checkbox" onchange="setTelnetEnabled(this.checked)"> Telnet aktivieren</label>
       <label><input id="otaToggle" type="checkbox" onchange="setOtaEnabled(this.checked)"> OTA aktivieren (10min): <span id="otaWindowHint">OTA inaktiv</span></label>
+      <label>Repeater BSSID (optional)
+        <span class="inline-field">
+          <input id="wifiBssidInput" type="text" placeholder="XX:XX:XX:XX:XX:XX" style="width:210px">
+          <button type="button" onclick="saveWifiBssid()">Speichern</button>
+        </span>
+      </label>
+      <div id="wifiBssidHint" style="color:#475569">BSSID-Lock inaktiv</div>
+      <label>Bootlog Maximum (50-500)
+        <span class="inline-field">
+          <input id="bootlogMaxInput" type="number" min="50" max="500" step="1" style="width:120px">
+          <button type="button" onclick="saveBootlogMax()">Speichern</button>
+        </span>
+      </label>
+      <div id="bootlogMaxHint" style="color:#475569">Bootlog-Historie: letzte 200 Eintraege</div>
+      <label>AUTH_FAIL Backoff (5-300s)
+        <span class="inline-field">
+          <input id="wifiAuthFailBackoffSecInput" type="number" min="5" max="300" step="1" style="width:120px">
+          <button type="button" onclick="saveWifiAuthFailBackoffSec()">Speichern</button>
+        </span>
+      </label>
+      <div id="wifiAuthFailBackoffHint" style="color:#475569">AUTH_FAIL Pause: 60s</div>
+      <label>AUTH_FAIL Schwellwert (2-20)
+        <span class="inline-field">
+          <input id="wifiAuthFailBackoffThresholdInput" type="number" min="2" max="20" step="1" style="width:120px">
+          <button type="button" onclick="saveWifiAuthFailBackoffThreshold()">Speichern</button>
+        </span>
+      </label>
+      <div id="wifiAuthFailBackoffThresholdHint" style="color:#475569">AUTH_FAIL Schwellwert: 5</div>
     </div>
     <div id="debugCompiledHint" style="color:#b45309;margin-bottom:8px"></div>
 

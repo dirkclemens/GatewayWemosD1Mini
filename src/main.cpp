@@ -20,7 +20,7 @@
 #define MY_DEBUG_VERBOSE
 
 // Baudrate fuer serielle Debug-Ausgabe
-#define MY_BAUD_RATE 9600
+#define MY_BAUD_RATE 115200
 
 // Enables and select radio type (if attached)
 #define MY_RADIO_RF24
@@ -125,7 +125,13 @@ static char gLastRestartMarker[160] = {'\0'};
 static const char *BOOT_COUNT_FILE = "/boot_count.txt";
 static const char *LAST_BOOT_EPOCH_FILE = "/last_boot_epoch.txt";
 static const char *LAST_RESTART_MARKER_FILE = "/last_restart_marker.txt";
+static const char *BOOT_LOG_FILE = "/bootlog.txt";
+static const char *BOOT_LOG_TMP_FILE = "/bootlog.tmp";
+static const char *BOOT_LOG_LIMIT_FILE = "/bootlog_limit.txt";
+static const uint32_t BOOTLOG_MIN_ENTRIES = 50U;
+static const uint32_t BOOTLOG_MAX_ENTRIES_LIMIT = 500U;
 static bool bootLogSyncedWritten = false;
+static uint32_t gBootLogMaxEntries = BOOTLOG_MAX_ENTRIES;
 
 
 // #ifdef MY_USE_UDP
@@ -155,6 +161,23 @@ boolean alertSent = false;
 ////////////////////////////////////////////////////////////////////////
 // includes
 #include <MySensors.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
+#include <stdio.h>
+
+// /////// /////////////////////////////////////////////////////////////////////
+// Initialize message types
+// https://www.mysensors.org/download/serial_api_20#variable-types
+// https://github.com/mysensors/MySensors/blob/development/core/MyMessage.h
+MyMessage msgGeneral(CHILD_ID_GENERAL, V_VAR1);
+MyMessage msgUptime(CHILD_ID_UPTIME, V_TEXT);
+
+// ARC (Automatic Retries Count) message
+#define SENSOR_ID_ARC		98
+#define V_TYPE_ARC			V_VAR5
+MyMessage arcMessage(SENSOR_ID_ARC, V_TYPE_ARC);
+
 
 /** serial or telnet output **/
 #ifdef TELNET
@@ -250,21 +273,212 @@ static unsigned long gw_send_prev_time;
 
 unsigned long cpuLastMicros = 0; // cpu utilisation
 unsigned long avgCpuDelta = 0;	 // cpu utilisation
+static unsigned long lastIndicatorMs = 0;
+static int lastIndicatorCode = -1;
 
 //---------------------------------------------------------------------
 #pragma endregion
 
-// /////// /////////////////////////////////////////////////////////////////////
-// Initialize message types
-// https://www.mysensors.org/download/serial_api_20#variable-types
-// https://github.com/mysensors/MySensors/blob/development/core/MyMessage.h
-MyMessage msgGeneral(CHILD_ID_GENERAL, V_VAR1);
-MyMessage msgUptime(CHILD_ID_UPTIME, V_TEXT);
 
-// ARC (Automatic Retries Count) message
-#define SENSOR_ID_ARC		98
-#define V_TYPE_ARC			V_VAR5
-MyMessage arcMessage(SENSOR_ID_ARC, V_TYPE_ARC);
+//=====================================================================
+#pragma region FreeRTOS Task function
+
+static SemaphoreHandle_t gStatsMutex = nullptr;
+static TaskHandle_t gSystemTaskHandle = nullptr;
+static volatile uint32_t gSystemHeartbeatMs = 0;
+static volatile uint32_t gMySensorsHeartbeatMs = 0;
+static volatile uint32_t gSystemLoopCount = 0;
+static volatile uint32_t gMySensorsLoopCount = 0;
+static const uint32_t TASK_HEALTH_STALL_MS = TASK_HEALTH_WATCHDOG_STALL_MS;
+static const uint32_t TASK_HEALTH_DIAG_MS = TASK_HEALTH_DIAG_INTERVAL_MS;
+
+struct SharedStatsSnapshot {
+	unsigned long gatewayTxMessage;
+	unsigned long gatewayRxMessage;
+	unsigned long sensorTxMessage;
+	unsigned long sensorRxMessage;
+	unsigned long indicatorTxErrors;
+	unsigned long lastIndicatorMs;
+	int lastIndicatorCode;
+};
+
+static inline bool lockStats(uint32_t timeoutMs = 20)
+{
+	if (!gStatsMutex) {
+		return false;
+	}
+	return xSemaphoreTake(gStatsMutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE;
+}
+
+static inline void unlockStats()
+{
+	if (gStatsMutex) {
+		xSemaphoreGive(gStatsMutex);
+	}
+}
+
+static SharedStatsSnapshot snapshotStats()
+{
+	SharedStatsSnapshot s{};
+	if (lockStats()) {
+		s.gatewayTxMessage = gatewayTxMessage;
+		s.gatewayRxMessage = gatewayRxMessage;
+		s.sensorTxMessage = sensorTxMessage;
+		s.sensorRxMessage = sensorRxMessage;
+		s.indicatorTxErrors = indicatorTxErrors;
+		s.lastIndicatorMs = lastIndicatorMs;
+		s.lastIndicatorCode = lastIndicatorCode;
+		unlockStats();
+	} else {
+		s.gatewayTxMessage = gatewayTxMessage;
+		s.gatewayRxMessage = gatewayRxMessage;
+		s.sensorTxMessage = sensorTxMessage;
+		s.sensorRxMessage = sensorRxMessage;
+		s.indicatorTxErrors = indicatorTxErrors;
+		s.lastIndicatorMs = lastIndicatorMs;
+		s.lastIndicatorCode = lastIndicatorCode;
+	}
+	return s;
+}
+
+static void resetDailyStats()
+{
+	if (lockStats()) {
+		gatewayTxMessage = 0;
+		gatewayRxMessage = 0;
+		sensorTxMessage = 0;
+		sensorRxMessage = 0;
+		indicatorTxErrors = 0;
+		unlockStats();
+		return;
+	}
+	gatewayTxMessage = 0;
+	gatewayRxMessage = 0;
+	sensorTxMessage = 0;
+	sensorRxMessage = 0;
+	indicatorTxErrors = 0;
+}
+
+static void taskSystemCore(void *pvParameters);
+static void loopSystemCore();
+static void loopMySensorsCore();
+static void persistPlannedRestartMarker(const char *cause);
+static bool readTextFile(const char *path, char *out, size_t outSize);
+static bool writeTextFile(const char *path, const char *text);
+static bool applyBootLogMaxEntries(uint32_t maxEntries, bool persist);
+static void loadBootLogMaxEntriesFromStorage();
+static bool applyWifiAuthFailBackoffMs(uint32_t backoffMs, bool persist);
+static void loadWifiAuthFailBackoffFromStorage();
+static bool applyWifiAuthFailBackoffThreshold(uint32_t threshold, bool persist);
+static void loadWifiAuthFailBackoffThresholdFromStorage();
+static void beatSystemTask();
+static void beatMySensorsTask();
+static void checkTaskHealthWatchdog();
+
+static void beatSystemTask()
+{
+	gSystemHeartbeatMs = millis();
+	gSystemLoopCount++;
+}
+
+static void beatMySensorsTask()
+{
+	gMySensorsHeartbeatMs = millis();
+	gMySensorsLoopCount++;
+}
+
+static uint32_t safeElapsedMs(uint32_t now, uint32_t then)
+{
+	// If 'then' is observed slightly in the future due to cross-core race,
+	// clamp to 0 to avoid false watchdog trips (e.g. age=4294967295).
+	const int32_t signedDelta = static_cast<int32_t>(now - then);
+	return (signedDelta < 0) ? 0U : static_cast<uint32_t>(signedDelta);
+}
+
+static bool heartbeatInFuture(uint32_t now, uint32_t then)
+{
+	return static_cast<int32_t>(now - then) < 0;
+}
+
+static void checkTaskHealthWatchdog()
+{
+	static unsigned long lastCheckMs = 0;
+	static unsigned long lastDiagMs = 0;
+	static unsigned long lastRaceDiagMs = 0;
+	static uint32_t prevSysLoops = 0;
+	static uint32_t prevMyLoops = 0;
+	static unsigned long prevDiagMs = 0;
+	const unsigned long now = millis();
+	if ((now - lastCheckMs) < 1000UL) {
+		return;
+	}
+	lastCheckMs = now;
+
+	const uint32_t sysBeat = gSystemHeartbeatMs;
+	const uint32_t myBeat = gMySensorsHeartbeatMs;
+	const uint32_t sysAge = (sysBeat == 0U) ? 0U : safeElapsedMs(static_cast<uint32_t>(now), sysBeat);
+	const uint32_t myAge = (myBeat == 0U) ? 0U : safeElapsedMs(static_cast<uint32_t>(now), myBeat);
+	const bool sysRace = (sysBeat != 0U) && heartbeatInFuture(static_cast<uint32_t>(now), sysBeat);
+	const bool myRace = (myBeat != 0U) && heartbeatInFuture(static_cast<uint32_t>(now), myBeat);
+
+	if ((sysRace || myRace) && (now - lastRaceDiagMs) >= 30000UL) {
+		lastRaceDiagMs = now;
+		dbgprintf(ico_warning,
+				  "[TASK] heartbeat race detected (sysRace=%u myRace=%u now=%lu sysBeat=%lu myBeat=%lu)",
+				  static_cast<unsigned>(sysRace ? 1U : 0U),
+				  static_cast<unsigned>(myRace ? 1U : 0U),
+				  static_cast<unsigned long>(now),
+				  static_cast<unsigned long>(sysBeat),
+				  static_cast<unsigned long>(myBeat));
+	}
+
+	if (myBeat != 0 && myAge > TASK_HEALTH_STALL_MS) {
+		dbgprintf(ico_error,
+				  "[TASK-WD] MySensors core stalled (age=%lu ms, loops sys=%lu my=%lu)",
+				  static_cast<unsigned long>(myAge),
+				  static_cast<unsigned long>(gSystemLoopCount),
+				  static_cast<unsigned long>(gMySensorsLoopCount));
+		persistPlannedRestartMarker("task-watchdog-mysensors-stall");
+		delay(100);
+		ESP.restart();
+	}
+
+	if ((now - lastDiagMs) >= TASK_HEALTH_DIAG_MS) {
+		lastDiagMs = now;
+		const uint32_t sysLoops = gSystemLoopCount;
+		const uint32_t myLoops = gMySensorsLoopCount;
+		const uint32_t sysDelta = (prevDiagMs == 0UL) ? 0U : (sysLoops - prevSysLoops);
+		const uint32_t myDelta = (prevDiagMs == 0UL) ? 0U : (myLoops - prevMyLoops);
+		const unsigned long diagElapsedMs = (prevDiagMs == 0UL) ? 0UL : (now - prevDiagMs);
+		const unsigned long sysLoopsPerSecX100 =
+			(diagElapsedMs > 0UL) ? static_cast<unsigned long>((100000UL * static_cast<unsigned long>(sysDelta)) / diagElapsedMs) : 0UL;
+		const unsigned long myLoopsPerSecX100 =
+			(diagElapsedMs > 0UL) ? static_cast<unsigned long>((100000UL * static_cast<unsigned long>(myDelta)) / diagElapsedMs) : 0UL;
+		const unsigned long sysLoopsPerSecInt = sysLoopsPerSecX100 / 100UL;
+		const unsigned long sysLoopsPerSecFrac = sysLoopsPerSecX100 % 100UL;
+		const unsigned long myLoopsPerSecInt = myLoopsPerSecX100 / 100UL;
+		const unsigned long myLoopsPerSecFrac = myLoopsPerSecX100 % 100UL;
+		dbgprintf(ico_info,
+				  "[TASK] sys(core0): loops=%lu delta=%lu rate=%lu.%02lu/s age=%lu ms | mys(core1): loops=%lu delta=%lu rate=%lu.%02lu/s age=%lu ms",
+				  static_cast<unsigned long>(sysLoops),
+				  static_cast<unsigned long>(sysDelta),
+				  sysLoopsPerSecInt,
+				  sysLoopsPerSecFrac,
+				  static_cast<unsigned long>(sysAge),
+				  static_cast<unsigned long>(myLoops),
+				  static_cast<unsigned long>(myDelta),
+				  myLoopsPerSecInt,
+				  myLoopsPerSecFrac,
+				  static_cast<unsigned long>(myAge));
+		prevSysLoops = sysLoops;
+		prevMyLoops = myLoops;
+		prevDiagMs = now;
+	}
+}
+
+//---------------------------------------------------------------------
+#pragma endregion
+
 
 //=====================================================================
 #pragma region telnet functions
@@ -587,6 +801,111 @@ static void removeFileIfExists(const char *path)
 	GATEWAY_FS.remove(path);
 }
 
+static bool appendBootLogBounded(const char *line)
+{
+	if (!line || !gatewayFsBegin()) {
+		return false;
+	}
+
+	uint32_t lineCount = 0;
+	if (GATEWAY_FS.exists(BOOT_LOG_FILE)) {
+		File srcCount = GATEWAY_FS.open(BOOT_LOG_FILE, "r");
+		if (srcCount && !srcCount.isDirectory()) {
+			while (srcCount.available()) {
+				(void)srcCount.readStringUntil('\n');
+				lineCount++;
+			}
+		}
+		srcCount.close();
+	}
+
+	const uint32_t maxEntries = (gBootLogMaxEntries > 0U) ? gBootLogMaxEntries : BOOTLOG_MAX_ENTRIES;
+	const uint32_t keepExisting = (maxEntries > 0U) ? (maxEntries - 1U) : 0U;
+	const uint32_t skipLines = (lineCount > keepExisting) ? (lineCount - keepExisting) : 0U;
+
+	File dst = GATEWAY_FS.open(BOOT_LOG_TMP_FILE, "w");
+	if (!dst || dst.isDirectory()) {
+		dst.close();
+		return false;
+	}
+
+	if (GATEWAY_FS.exists(BOOT_LOG_FILE)) {
+		File src = GATEWAY_FS.open(BOOT_LOG_FILE, "r");
+		if (src && !src.isDirectory()) {
+			uint32_t idx = 0;
+			while (src.available()) {
+				String l = src.readStringUntil('\n');
+				if (idx >= skipLines) {
+					dst.println(l);
+				}
+				idx++;
+			}
+		}
+		src.close();
+	}
+
+	dst.println(line);
+	dst.close();
+
+	removeFileIfExists(BOOT_LOG_FILE);
+	if (!GATEWAY_FS.rename(BOOT_LOG_TMP_FILE, BOOT_LOG_FILE)) {
+		removeFileIfExists(BOOT_LOG_TMP_FILE);
+		return false;
+	}
+	return true;
+}
+
+static bool applyBootLogMaxEntries(uint32_t maxEntries, bool persist)
+{
+	if (maxEntries < BOOTLOG_MIN_ENTRIES || maxEntries > BOOTLOG_MAX_ENTRIES_LIMIT) {
+		return false;
+	}
+
+	const bool changed = (gBootLogMaxEntries != maxEntries);
+	gBootLogMaxEntries = maxEntries;
+
+	if (persist && changed) {
+		char buf[16] = {'\0'};
+		snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(maxEntries));
+		if (!writeTextFile(BOOT_LOG_LIMIT_FILE, buf)) {
+			return false;
+		}
+	}
+
+	if (changed) {
+		dbgprintf(ico_info, "[Bootlog] max entries set to %lu", static_cast<unsigned long>(gBootLogMaxEntries));
+	}
+
+	return true;
+}
+
+static void loadBootLogMaxEntriesFromStorage()
+{
+	char buf[24] = {'\0'};
+	if (!readTextFile(BOOT_LOG_LIMIT_FILE, buf, sizeof(buf))) {
+		return;
+	}
+	char *endp = nullptr;
+	const unsigned long v = strtoul(buf, &endp, 10);
+	if (endp == buf || !applyBootLogMaxEntries(static_cast<uint32_t>(v), false)) {
+		dbgprintf(ico_warning,
+				  "[Bootlog] invalid persisted max entries ignored: %s (allowed %lu..%lu)",
+				  buf,
+				  static_cast<unsigned long>(BOOTLOG_MIN_ENTRIES),
+				  static_cast<unsigned long>(BOOTLOG_MAX_ENTRIES_LIMIT));
+	}
+}
+
+uint32_t getBootLogMaxEntries()
+{
+	return gBootLogMaxEntries;
+}
+
+bool setBootLogMaxEntries(uint32_t maxEntries)
+{
+	return applyBootLogMaxEntries(maxEntries, true);
+}
+
 static void captureResetReasonRaw()
 {
 	snprintf(gResetReasonRaw, sizeof(gResetReasonRaw), "esp_reset_reason=%u", static_cast<unsigned>(esp_reset_reason()));
@@ -642,41 +961,33 @@ void logBootTime(bool ntpOk)
 	boolean fsOk = gatewayFsBegin();
 	if (fsOk)
 	{
-		File file = GATEWAY_FS.open("/bootlog.txt", "a");
-		if (!file || file.isDirectory())
-		{
-			dbgprintln(ico_error, "Error: Unable to open boot log in filesystem");
+		char resetReason[48];
+		snprintf(resetReason, sizeof(resetReason), "%s", getResetReasonText(gResetReasonCode));
+		resetReason[sizeof(resetReason) - 1] = '\0';
+
+		char timestamp[24] = {'\0'};
+		if (ntpOk) {
+			getCurrentTimeString(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S");
+		} else {
+			snprintf(timestamp, sizeof(timestamp), "unsynced@%lus", millis() / 1000UL);
 		}
-		else
+
+		char buffer[320] = {'\0'};
+		if (snprintf(buffer, sizeof(buffer),
+					 "%s | boot=%lu | rst=%s | rst_raw=%s | planned=%s | heap=%lu | ip=%s",
+					 timestamp,
+					 static_cast<unsigned long>(bootCount),
+					 resetReason,
+					 gResetReasonRaw,
+					 gLastRestartMarker[0] ? gLastRestartMarker : "none",
+					 static_cast<unsigned long>(ESP.getFreeHeap()),
+					 WiFi.localIP().toString().c_str()) < 0)
 		{
-			char resetReason[48];
-			snprintf(resetReason, sizeof(resetReason), "%s", getResetReasonText(gResetReasonCode));
-			resetReason[sizeof(resetReason) - 1] = '\0';
-
-			char timestamp[24] = {'\0'};
-			if (ntpOk) {
-				getCurrentTimeString(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S");
-			} else {
-				snprintf(timestamp, sizeof(timestamp), "unsynced@%lus", millis() / 1000UL);
-			}
-
-			char buffer[320] = {'\0'};
-			if (snprintf(buffer, sizeof(buffer),
-						 "%s | boot=%lu | rst=%s | rst_raw=%s | planned=%s | heap=%lu | ip=%s",
-						 timestamp,
-						 static_cast<unsigned long>(bootCount),
-						 resetReason,
-						 gResetReasonRaw,
-						 gLastRestartMarker[0] ? gLastRestartMarker : "none",
-						 static_cast<unsigned long>(ESP.getFreeHeap()),
-						 WiFi.localIP().toString().c_str()) < 0)
-			{
-				buffer[0] = '\0';
-			}
-			dbgprintf(ico_info, "adding to bootlog.txt: %s", buffer);
-			file.println(buffer); // add entry to log file
 			buffer[0] = '\0';
-			file.close();
+		}
+		dbgprintf(ico_info, "adding to bootlog.txt: %s", buffer);
+		if (!appendBootLogBounded(buffer)) {
+			dbgprintln(ico_error, "Error: Unable to write bounded boot log");
 		}
 		// GATEWAY_FS.end();
 	}
@@ -924,6 +1235,7 @@ void updateWebStats()
 	WS_APPEND("<tr><td>build</td><td>%s %s</td></tr>",           __DATE__, __TIME__);
 	WS_APPEND("<tr><td>sw version</td><td>%s</td></tr>",         __SWVERSION__);
 	WS_APPEND("<tr><td>boot count</td><td>%lu</td></tr>",        static_cast<unsigned long>(bootCount));
+	WS_APPEND("<tr><td>bootlog limit</td><td>%lu Eintraege</td></tr>", static_cast<unsigned long>(getBootLogMaxEntries()));
 	WS_APPEND("<tr><td>reset reason code</td><td>%u</td></tr>",  static_cast<unsigned>(gResetReasonCode));
 	WS_APPEND("<tr><td>reset reason raw</td><td>%s</td></tr>",   gResetReasonRaw);
 	WS_APPEND("<tr><td><a href=\"/bootlog.txt\">reset reason</a></td><td>%s</td></tr>", resetReason);
@@ -1109,22 +1421,10 @@ void receive(const MyMessage &message)
 //=====================================================================
 #pragma endregion
 
-/*
- *
- */
-int counter = 0;
-static unsigned long wifiReconnectFirstFailMs = 0;
-static unsigned long wifiLastBeginMs = 0;
-static wl_status_t wifiLastStatus = WL_IDLE_STATUS;
-static uint8_t wifiReconnectTimeoutCycles = 0;
-static bool wifiStackRecoveryDone = false;
-static unsigned long lastIndicatorMs = 0;
-static int lastIndicatorCode = -1;
 
-static const unsigned long WIFI_BEGIN_INTERVAL_MS = 15000UL;          // retry WiFi.begin every 15s
-static const unsigned long WIFI_STACK_RECOVERY_MS = 1000UL * 60UL * 5UL; // hard WiFi reset after 5 minutes disconnected
-static const unsigned long WIFI_RECONNECT_TIMEOUT_MS = 1000UL * 60UL * 10UL; // evaluate every 10 minutes
-static const uint8_t WIFI_TIMEOUT_CYCLES_BEFORE_RESTART = 1; // restart after first timeout window post stage-1
+//=====================================================================
+#pragma region NTP/Time function
+
 static const unsigned long NTP_RETRY_INTERVAL_MS = 30000UL;
 static unsigned long lastNtpConfigMs = 0;
 static uint8_t ntpServerSetIndex = 0;
@@ -1180,6 +1480,283 @@ static void requestNtpSync(bool force = false)
 void triggerNtpSync()
 {
 	requestNtpSync(true);
+}
+
+//=====================================================================
+#pragma region Wifi function
+/*
+ *
+ */
+int counter = 0;
+static unsigned long wifiReconnectFirstFailMs = 0;
+static unsigned long wifiLastBeginMs = 0;
+static unsigned long wifiNextBeginAllowedMs = 0;
+static wl_status_t wifiLastStatus = WL_IDLE_STATUS;
+static uint8_t wifiReconnectTimeoutCycles = 0;
+static uint8_t wifiReconnectAttempts = 0;
+static bool wifiStackRecoveryDone = false;
+static volatile uint8_t wifiAuthFailStreak = 0;
+static volatile bool wifiAuthFailFallbackPending = false;
+static unsigned long wifiAuthFailBackoffUntilMs = 0;
+static volatile bool wifiDisconnectedEventPending = false;
+static volatile uint8_t wifiLastDisconnectReason = 0U;
+static volatile bool wifiGotIpEventPending = false;
+static const char *WIFI_REPEATER_BSSID_FILE = "/wifi_repeater_bssid.txt";
+static const char *WIFI_AUTHFAIL_BACKOFF_FILE = "/wifi_authfail_backoff_ms.txt";
+static const char *WIFI_AUTHFAIL_BACKOFF_THRESHOLD_FILE = "/wifi_authfail_backoff_threshold.txt";
+static const uint32_t WIFI_AUTHFAIL_BACKOFF_MIN_MS = 5000U;
+static const uint32_t WIFI_AUTHFAIL_BACKOFF_MAX_MS = 300000U;
+static const uint32_t WIFI_AUTHFAIL_BACKOFF_THRESHOLD_MIN = 2U;
+static const uint32_t WIFI_AUTHFAIL_BACKOFF_THRESHOLD_MAX = 20U;
+static bool gWifiRepeaterBssidLocked = false;
+static uint8_t gWifiRepeaterBssid[6] = {0};
+static char gWifiRepeaterBssidText[18] = {'\0'};
+static bool gWifiForceAnyApFallback = false;
+static uint32_t gWifiAuthFailBackoffMs = CFG_WIFI_AUTHFAIL_BACKOFF_MS;
+static uint8_t gWifiAuthFailBackoffThreshold = static_cast<uint8_t>(CFG_WIFI_AUTHFAIL_STREAK_BACKOFF_THRESHOLD);
+
+static const unsigned long WIFI_RECONNECT_MIN_FAIL_MS = CFG_WIFI_RECONNECT_MIN_FAIL_MS;
+static const unsigned long WIFI_BEGIN_BASE_INTERVAL_MS = CFG_WIFI_RECONNECT_BASE_INTERVAL_MS;
+static const unsigned long WIFI_BEGIN_MAX_INTERVAL_MS = CFG_WIFI_RECONNECT_MAX_INTERVAL_MS;
+static const unsigned long WIFI_STACK_RECOVERY_MS = CFG_WIFI_STACK_RECOVERY_MS;
+static const unsigned long WIFI_RECONNECT_TIMEOUT_MS = CFG_WIFI_RECONNECT_TIMEOUT_MS;
+static const uint8_t WIFI_TIMEOUT_CYCLES_BEFORE_RESTART = static_cast<uint8_t>(CFG_WIFI_TIMEOUT_CYCLES_BEFORE_RESTART);
+
+
+static bool parseBssidString(const char *text, uint8_t out[6], char normalized[18])
+{
+	if (!text || !out || !normalized) {
+		return false;
+	}
+	unsigned int b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0;
+	int n = sscanf(text, "%2x:%2x:%2x:%2x:%2x:%2x", &b0, &b1, &b2, &b3, &b4, &b5);
+	if (n != 6) {
+		n = sscanf(text, "%2x-%2x-%2x-%2x-%2x-%2x", &b0, &b1, &b2, &b3, &b4, &b5);
+		if (n != 6) {
+			return false;
+		}
+	}
+	out[0] = static_cast<uint8_t>(b0);
+	out[1] = static_cast<uint8_t>(b1);
+	out[2] = static_cast<uint8_t>(b2);
+	out[3] = static_cast<uint8_t>(b3);
+	out[4] = static_cast<uint8_t>(b4);
+	out[5] = static_cast<uint8_t>(b5);
+	snprintf(normalized, 18, "%02X:%02X:%02X:%02X:%02X:%02X", out[0], out[1], out[2], out[3], out[4], out[5]);
+	normalized[17] = '\0';
+	return true;
+}
+
+const char *getWifiRepeaterBssid()
+{
+	return gWifiRepeaterBssidLocked ? gWifiRepeaterBssidText : "";
+}
+
+bool isWifiRepeaterBssidLocked()
+{
+	return gWifiRepeaterBssidLocked;
+}
+
+static bool applyWifiRepeaterBssid(const String &bssid, bool persist)
+{
+	String value = bssid;
+	value.trim();
+	if (!value.length()) {
+		const bool hadLock = gWifiRepeaterBssidLocked;
+		gWifiRepeaterBssidLocked = false;
+		gWifiRepeaterBssidText[0] = '\0';
+		memset(gWifiRepeaterBssid, 0, sizeof(gWifiRepeaterBssid));
+		if (persist && hadLock && gatewayFsBegin()) {
+			GATEWAY_FS.remove(WIFI_REPEATER_BSSID_FILE);
+		}
+		if (hadLock) {
+			dbgprintln(ico_info, "[WiFi] repeater BSSID lock cleared");
+		}
+		return true;
+	}
+
+	uint8_t parsed[6] = {0};
+	char normalized[18] = {'\0'};
+	if (!parseBssidString(value.c_str(), parsed, normalized)) {
+		return false;
+	}
+
+	const bool changed = (!gWifiRepeaterBssidLocked) || (strncmp(gWifiRepeaterBssidText, normalized, sizeof(gWifiRepeaterBssidText)) != 0);
+	memcpy(gWifiRepeaterBssid, parsed, sizeof(gWifiRepeaterBssid));
+	snprintf(gWifiRepeaterBssidText, sizeof(gWifiRepeaterBssidText), "%s", normalized);
+	gWifiRepeaterBssidText[sizeof(gWifiRepeaterBssidText) - 1] = '\0';
+	gWifiRepeaterBssidLocked = true;
+
+	if (persist && changed) {
+		(void)writeTextFile(WIFI_REPEATER_BSSID_FILE, gWifiRepeaterBssidText);
+	}
+	if (changed) {
+		dbgprintf(ico_info, "[WiFi] repeater BSSID lock set to %s", gWifiRepeaterBssidText);
+	}
+	return true;
+}
+
+bool setWifiRepeaterBssid(const String &bssid)
+{
+	return applyWifiRepeaterBssid(bssid, true);
+}
+
+static void loadWifiRepeaterBssidFromStorage()
+{
+	char buf[24] = {'\0'};
+	if (readTextFile(WIFI_REPEATER_BSSID_FILE, buf, sizeof(buf))) {
+		String value(buf);
+		value.trim();
+		if (!applyWifiRepeaterBssid(value, false)) {
+			dbgprintf(ico_warning, "[WiFi] invalid stored repeater BSSID ignored: %s", buf);
+		}
+	}
+}
+
+static bool applyWifiAuthFailBackoffMs(uint32_t backoffMs, bool persist)
+{
+	if (backoffMs < WIFI_AUTHFAIL_BACKOFF_MIN_MS || backoffMs > WIFI_AUTHFAIL_BACKOFF_MAX_MS) {
+		return false;
+	}
+	const bool changed = (gWifiAuthFailBackoffMs != backoffMs);
+	gWifiAuthFailBackoffMs = backoffMs;
+	if (persist && changed) {
+		char buf[16] = {'\0'};
+		snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(backoffMs));
+		if (!writeTextFile(WIFI_AUTHFAIL_BACKOFF_FILE, buf)) {
+			return false;
+		}
+	}
+	if (changed) {
+		dbgprintf(ico_info,
+				  "[WiFi] AUTH_FAIL backoff set to %lu ms",
+				  static_cast<unsigned long>(gWifiAuthFailBackoffMs));
+	}
+	return true;
+}
+
+static void loadWifiAuthFailBackoffFromStorage()
+{
+	char buf[24] = {'\0'};
+	if (!readTextFile(WIFI_AUTHFAIL_BACKOFF_FILE, buf, sizeof(buf))) {
+		return;
+	}
+	char *endp = nullptr;
+	const unsigned long v = strtoul(buf, &endp, 10);
+	if (endp == buf || !applyWifiAuthFailBackoffMs(static_cast<uint32_t>(v), false)) {
+		dbgprintf(ico_warning,
+				  "[WiFi] invalid stored AUTH_FAIL backoff ignored: %s (allowed %lu..%lu ms)",
+				  buf,
+				  static_cast<unsigned long>(WIFI_AUTHFAIL_BACKOFF_MIN_MS),
+				  static_cast<unsigned long>(WIFI_AUTHFAIL_BACKOFF_MAX_MS));
+	}
+}
+
+uint32_t getWifiAuthFailBackoffMs()
+{
+	return gWifiAuthFailBackoffMs;
+}
+
+bool setWifiAuthFailBackoffMs(uint32_t backoffMs)
+{
+	return applyWifiAuthFailBackoffMs(backoffMs, true);
+}
+
+static bool applyWifiAuthFailBackoffThreshold(uint32_t threshold, bool persist)
+{
+	if (threshold < WIFI_AUTHFAIL_BACKOFF_THRESHOLD_MIN || threshold > WIFI_AUTHFAIL_BACKOFF_THRESHOLD_MAX) {
+		return false;
+	}
+	const uint8_t value = static_cast<uint8_t>(threshold);
+	const bool changed = (gWifiAuthFailBackoffThreshold != value);
+	gWifiAuthFailBackoffThreshold = value;
+	if (persist && changed) {
+		char buf[8] = {'\0'};
+		snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(value));
+		if (!writeTextFile(WIFI_AUTHFAIL_BACKOFF_THRESHOLD_FILE, buf)) {
+			return false;
+		}
+	}
+	if (changed) {
+		dbgprintf(ico_info,
+				  "[WiFi] AUTH_FAIL backoff threshold set to %u",
+				  static_cast<unsigned>(gWifiAuthFailBackoffThreshold));
+	}
+	return true;
+}
+
+static void loadWifiAuthFailBackoffThresholdFromStorage()
+{
+	char buf[24] = {'\0'};
+	if (!readTextFile(WIFI_AUTHFAIL_BACKOFF_THRESHOLD_FILE, buf, sizeof(buf))) {
+		return;
+	}
+	char *endp = nullptr;
+	const unsigned long v = strtoul(buf, &endp, 10);
+	if (endp == buf || !applyWifiAuthFailBackoffThreshold(static_cast<uint32_t>(v), false)) {
+		dbgprintf(ico_warning,
+				  "[WiFi] invalid stored AUTH_FAIL backoff threshold ignored: %s (allowed %lu..%lu)",
+				  buf,
+				  static_cast<unsigned long>(WIFI_AUTHFAIL_BACKOFF_THRESHOLD_MIN),
+				  static_cast<unsigned long>(WIFI_AUTHFAIL_BACKOFF_THRESHOLD_MAX));
+	}
+}
+
+uint32_t getWifiAuthFailBackoffThreshold()
+{
+	return static_cast<uint32_t>(gWifiAuthFailBackoffThreshold);
+}
+
+bool setWifiAuthFailBackoffThreshold(uint32_t threshold)
+{
+	return applyWifiAuthFailBackoffThreshold(threshold, true);
+}
+
+static void beginWifiConnect()
+{
+#if defined(MY_WIFI_SSID) && defined(MY_WIFI_PASSWORD)
+	if (gWifiRepeaterBssidLocked && !gWifiForceAnyApFallback) {
+		dbgprintf(ico_info, "[WiFi] connect using locked repeater BSSID %s", gWifiRepeaterBssidText);
+		WiFi.begin(MY_WIFI_SSID, MY_WIFI_PASSWORD, 0, gWifiRepeaterBssid, true);
+	} else {
+		if (gWifiRepeaterBssidLocked && gWifiForceAnyApFallback) {
+			dbgprintf(ico_warning,
+					  "[WiFi] connect fallback: any AP with SSID %s allowed (ignoring lock %s)",
+					  MY_WIFI_SSID,
+					  gWifiRepeaterBssidText);
+		}
+		WiFi.begin(MY_WIFI_SSID, MY_WIFI_PASSWORD);
+	}
+#else
+	WiFi.begin();
+#endif
+}
+
+static unsigned long computeWifiBeginBackoffMs(uint8_t attempts)
+{
+	const uint8_t shift = (attempts > 4U) ? 4U : attempts;
+	const unsigned long scaled = WIFI_BEGIN_BASE_INTERVAL_MS << shift;
+	return (scaled > WIFI_BEGIN_MAX_INTERVAL_MS) ? WIFI_BEGIN_MAX_INTERVAL_MS : scaled;
+}
+
+static bool shouldAttemptWifiBegin(wl_status_t status, unsigned long now)
+{
+	if (status == WL_IDLE_STATUS || status == WL_SCAN_COMPLETED) {
+		return false;
+	}
+
+	if (status != WL_DISCONNECTED &&
+		status != WL_CONNECT_FAILED &&
+		status != WL_CONNECTION_LOST &&
+		status != WL_NO_SSID_AVAIL) {
+		return false;
+	}
+
+	if (wifiReconnectFirstFailMs == 0 || (now - wifiReconnectFirstFailMs) < WIFI_RECONNECT_MIN_FAIL_MS) {
+		return false;
+	}
+
+	return now >= wifiNextBeginAllowedMs;
 }
 
 const char *wifiStatusToString(wl_status_t status)
@@ -1250,21 +1827,31 @@ void setupWifiEventLogging()
 {
 	WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
 		if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
-			dbgprintf(ico_error,
-					  "[WiFiEvt] disconnected | reason=%u (%s) | status=%s (%d) | RSSI=%d",
-					  info.wifi_sta_disconnected.reason,
-					  wifiDisconnectReasonToString(info.wifi_sta_disconnected.reason),
-					  wifiStatusToString(WiFi.status()),
-					  static_cast<int>(WiFi.status()),
-					  WiFi.RSSI());
+			const uint8_t reason = info.wifi_sta_disconnected.reason;
+			wifiLastDisconnectReason = reason;
+			wifiDisconnectedEventPending = true;
+			if (reason == 202U || reason == 23U) {
+				if (wifiAuthFailStreak < 255U) {
+					wifiAuthFailStreak++;
+				}
+				if (wifiAuthFailStreak >= gWifiAuthFailBackoffThreshold) {
+					const unsigned long until = millis() + gWifiAuthFailBackoffMs;
+					if (static_cast<long>(until - wifiAuthFailBackoffUntilMs) > 0L) {
+						wifiAuthFailBackoffUntilMs = until;
+					}
+				}
+				if (gWifiRepeaterBssidLocked && !gWifiForceAnyApFallback && wifiAuthFailStreak >= 3U) {
+					wifiAuthFailFallbackPending = true;
+				}
+			} else {
+				wifiAuthFailStreak = 0U;
+			}
 		} else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
-			dbgprintf(ico_ok,
-					  "[WiFiEvt] got-ip | ip=%s | status=%s (%d) | RSSI=%d",
-					  WiFi.localIP().toString().c_str(),
-					  wifiStatusToString(WiFi.status()),
-					  static_cast<int>(WiFi.status()),
-					  WiFi.RSSI());
-			requestNtpSync(true);
+			wifiGotIpEventPending = true;
+			wifiAuthFailStreak = 0U;
+			wifiAuthFailFallbackPending = false;
+			wifiAuthFailBackoffUntilMs = 0;
+			gWifiForceAnyApFallback = false;
 		}
 	});
 }
@@ -1273,6 +1860,54 @@ void loop_Wifi()
 {
 	const unsigned long now = millis();
 	const wl_status_t status = WiFi.status();
+
+	if (wifiDisconnectedEventPending) {
+		const uint8_t reason = wifiLastDisconnectReason;
+		wifiDisconnectedEventPending = false;
+		dbgprintf(ico_error,
+				  "[WiFiEvt] disconnected | reason=%u (%s) | status=%s (%d) | RSSI=%d",
+				  static_cast<unsigned>(reason),
+				  wifiDisconnectReasonToString(reason),
+				  wifiStatusToString(status),
+				  static_cast<int>(status),
+				  WiFi.RSSI());
+	}
+
+	if (wifiGotIpEventPending) {
+		wifiGotIpEventPending = false;
+		dbgprintf(ico_ok,
+				  "[WiFiEvt] got-ip | ip=%s | status=%s (%d) | RSSI=%d",
+				  WiFi.localIP().toString().c_str(),
+				  wifiStatusToString(status),
+				  static_cast<int>(status),
+				  WiFi.RSSI());
+		requestNtpSync(true);
+	}
+
+	if (wifiAuthFailFallbackPending) {
+		wifiAuthFailFallbackPending = false;
+		if (isWifiRepeaterBssidLocked()) {
+			dbgprintf(ico_warning,
+					  "[WiFi] repeated AUTH_FAIL (%u) with BSSID lock %s -> enable any-AP fallback and retry",
+					  static_cast<unsigned>(wifiAuthFailStreak),
+					  getWifiRepeaterBssid());
+			gWifiForceAnyApFallback = true;
+			wifiAuthFailStreak = 0U;
+			wifiAuthFailBackoffUntilMs = 0;
+			wifiReconnectAttempts = 0;
+			wifiReconnectTimeoutCycles = 0;
+			wifiStackRecoveryDone = false;
+			wifiReconnectFirstFailMs = now - WIFI_RECONNECT_MIN_FAIL_MS;
+			wifiNextBeginAllowedMs = now;
+			beginWifiConnect();
+			wifiLastBeginMs = now;
+			dbgprintln(ico_warning, "[WiFi] retrying with any AP of same SSID (BSSID lock kept for later)");
+		} else {
+			dbgprintf(ico_warning,
+					  "[WiFi] repeated AUTH_FAIL (%u) without BSSID lock -> check SSID/password/AP auth policy",
+					  static_cast<unsigned>(wifiAuthFailStreak));
+		}
+	}
 
 	// connected again: clear reconnect state
 	if (status == WL_CONNECTED)
@@ -1283,8 +1918,14 @@ void loop_Wifi()
 		}
 		wifiReconnectFirstFailMs = 0;
 		wifiLastBeginMs = 0;
+		wifiNextBeginAllowedMs = 0;
 		wifiReconnectTimeoutCycles = 0;
+		wifiReconnectAttempts = 0;
 		wifiStackRecoveryDone = false;
+		wifiAuthFailStreak = 0U;
+		wifiAuthFailFallbackPending = false;
+		wifiAuthFailBackoffUntilMs = 0;
+		gWifiForceAnyApFallback = false;
 		counter = 0;
 		wifiLastStatus = status;
 		return;
@@ -1303,17 +1944,39 @@ void loop_Wifi()
 		wifiLastStatus = status;
 	}
 
-	// avoid WiFi.begin() spam; retry periodically
-	if (wifiLastBeginMs == 0 || (now - wifiLastBeginMs) >= WIFI_BEGIN_INTERVAL_MS)
+	// Start a new connect attempt only after minimum failure age and backoff window.
+	if (shouldAttemptWifiBegin(status, now))
 	{
-		dbgprintln(ico_info, "[WiFi] calling WiFi.begin()");
-#ifdef MY_CORE_ONLY
-		WiFi.begin(MY_WIFI_SSID, MY_WIFI_PASSWORD);
-#else
-		WiFi.begin();
-#endif
+		if (wifiAuthFailBackoffUntilMs != 0 && static_cast<long>(now - wifiAuthFailBackoffUntilMs) < 0L) {
+			const unsigned long remaining = wifiAuthFailBackoffUntilMs - now;
+			static unsigned long lastAuthBackoffLogMs = 0;
+			if ((now - lastAuthBackoffLogMs) >= 10000UL) {
+				lastAuthBackoffLogMs = now;
+				dbgprintf(ico_warning,
+						  "[WiFi] AUTH_FAIL backoff active: wait %lu ms before next begin",
+						  remaining);
+			}
+			return;
+		}
+
+		const unsigned long disconnectedForMs = (wifiReconnectFirstFailMs == 0) ? 0UL : (now - wifiReconnectFirstFailMs);
+		const unsigned long backoffMs = computeWifiBeginBackoffMs(wifiReconnectAttempts);
+		dbgprintf(ico_info,
+				  "[WiFi] begin attempt=%u status=%s disconnected_for=%lu ms backoff=%lu ms",
+				  static_cast<unsigned>(wifiReconnectAttempts + 1U),
+				  wifiStatusToString(status),
+				  disconnectedForMs,
+				  backoffMs);
+		beginWifiConnect();
 		wifiLastBeginMs = now;
+		wifiNextBeginAllowedMs = now + backoffMs;
+		if (wifiReconnectAttempts < 10U) {
+			wifiReconnectAttempts++;
+		}
 		counter++;
+		dbgprintf(ico_info,
+				  "[WiFi] next reconnect try in %lu ms",
+				  static_cast<unsigned long>(wifiNextBeginAllowedMs - now));
 	}
 
 	yield();
@@ -1322,19 +1985,22 @@ void loop_Wifi()
 	// Stage 1: hard reset WiFi stack once after 5 minutes disconnect.
 	if (!wifiStackRecoveryDone && (now - wifiReconnectFirstFailMs) >= WIFI_STACK_RECOVERY_MS)
 	{
-		dbgprintln(ico_warning, "[WiFi] stage1 recovery: hard reset WiFi stack");
+		dbgprintf(ico_warning,
+				  "[WiFi] stage1 recovery after %lu ms disconnect: hard reset WiFi stack",
+				  static_cast<unsigned long>(now - wifiReconnectFirstFailMs));
 		persistPlannedRestartMarker("wifi-stack-recovery");
 		WiFi.disconnect(true);
 		delay(200);
 		WiFi.mode(WIFI_OFF);
 		delay(200);
 		WiFi.mode(WIFI_STA);
-#ifdef MY_CORE_ONLY
-		WiFi.begin(MY_WIFI_SSID, MY_WIFI_PASSWORD);
-#else
-		WiFi.begin();
+#if WIFI_DISABLE_POWERSAVE
+		WiFi.setSleep(false);
 #endif
+		beginWifiConnect();
 		wifiLastBeginMs = now;
+		wifiReconnectAttempts = 1;
+		wifiNextBeginAllowedMs = now + computeWifiBeginBackoffMs(wifiReconnectAttempts);
 		wifiStackRecoveryDone = true;
 		wifiReconnectFirstFailMs = now;
 		wifiReconnectTimeoutCycles = 0;
@@ -1363,6 +2029,8 @@ void loop_Wifi()
 	}
 }
 
+//=====================================================================
+#pragma endregion
 /* 
  *
  */
@@ -1381,6 +2049,9 @@ void setup_wifi()
 {
 	// scrollMessage("wifi setup");
 	WiFi.setPhyMode(WIFI_PHY_MODE_11N); // Force 802.11N connection
+#if WIFI_DISABLE_POWERSAVE
+	WiFi.setSleep(false);
+#endif
 
 	delay(10);
 	// We start by connecting to a WiFi network
@@ -1388,7 +2059,7 @@ void setup_wifi()
 	dbgprintf(ico_ok, "Connecting to %s", MY_WIFI_SSID);
 
 	WiFi.mode(WIFI_STA);
-	WiFi.begin(MY_WIFI_SSID, MY_WIFI_PASSWORD);
+	beginWifiConnect();
 
 	int counter = 0;
 	while (WiFi.status() != WL_CONNECTED)
@@ -1608,11 +2279,7 @@ void loop_NTP()
 	if (checkMidnight())
 	{
 		// reset all counter on midnight
-		gatewayTxMessage = 0;
-		gatewayRxMessage = 0;
-		sensorTxMessage = 0;
-		sensorRxMessage = 0;
-		indicatorTxErrors = 0;
+		resetDailyStats();
 	}
 
 	if (!bootTimeSynced || WiFi.status() != WL_CONNECTED) {
@@ -1648,61 +2315,88 @@ void loop_NTP()
 #ifdef WITH_WEB_DEBUG
 void indication(const indication_t indicator)
 {
-	lastIndicatorCode = static_cast<int>(indicator);
-	lastIndicatorMs = millis();
+	if (lockStats()) {
+		lastIndicatorCode = static_cast<int>(indicator);
+		lastIndicatorMs = millis();
+		switch (indicator)
+		{
+		case INDICATION_GW_TX:
+			gatewayTxMessage++;
+			rxtxStats.nGwTx++;
+			break;
+
+		case INDICATION_GW_RX:
+			gatewayRxMessage++;
+			rxtxStats.nGwRx++;
+			break;
+
+		case INDICATION_TX:
+			sensorTxMessage++;
+			rxtxStats.nTx++;
+			break;
+
+		case INDICATION_RX:
+			sensorRxMessage++;
+			rxtxStats.nRx++;
+			break;
+
+		case INDICATION_ERR_TX:
+			rxtxStats.nErr++;
+			break;
+
+		default:
+			break;
+		};
+
+		if (indicator >= 101 && indicator <= 116)
+		{
+			indicatorTxErrors++;
+		}
+		unlockStats();
+	} else {
+		lastIndicatorCode = static_cast<int>(indicator);
+		lastIndicatorMs = millis();
+		switch (indicator)
+		{
+		case INDICATION_GW_TX:
+			gatewayTxMessage++;
+			rxtxStats.nGwTx++;
+			break;
+
+		case INDICATION_GW_RX:
+			gatewayRxMessage++;
+			rxtxStats.nGwRx++;
+			break;
+
+		case INDICATION_TX:
+			sensorTxMessage++;
+			rxtxStats.nTx++;
+			break;
+
+		case INDICATION_RX:
+			sensorRxMessage++;
+			rxtxStats.nRx++;
+			break;
+
+		case INDICATION_ERR_TX:
+			rxtxStats.nErr++;
+			break;
+
+		default:
+			break;
+		};
+
+		if (indicator >= 101 && indicator <= 116)
+		{
+			indicatorTxErrors++;
+		}
+	}
+
 	const bool webDebugEnabled = isWebDebugEnabled();
-
-	switch (indicator)
-	{
-	case INDICATION_GW_TX:
-		gatewayTxMessage++;
-		rxtxStats.nGwTx++;
-		if (webDebugEnabled) {
-			send_Event("&#128994;", "led"); // 🟢
-		}
-		break;
-
-	case INDICATION_GW_RX:
-		gatewayRxMessage++;
-		rxtxStats.nGwRx++; 
-		if (webDebugEnabled) {
-			send_Event("&#128308;", "led"); // 🔴
-		}
-		break;
-
-	case INDICATION_TX:
-		sensorTxMessage++;
-		rxtxStats.nTx++; 
-		if (webDebugEnabled) {
-			send_Event("&#128994;", "led"); // 🟢
-		}
-		break;
-
-	case INDICATION_RX:
-		sensorRxMessage++;
-		rxtxStats.nRx++; 
-		if (webDebugEnabled) {
-			send_Event("&#128308;", "led"); // 🔴
-		}
-		break;
-
-	case INDICATION_ERR_TX:
-		rxtxStats.nErr++;
-		if (webDebugEnabled) {
-			send_Event("&#128308;", "led"); // 🔴
-		}
-		break;
-
-	default:
-		if (webDebugEnabled) {
-			send_Event("&#128993;", "led"); // 🟡
-		}
-		break;
-	};
-
-	if (indicator >= 101 && indicator <= 116)
-	{
-		indicatorTxErrors++;
+	if (webDebugEnabled) {
+		send_Event((indicator == INDICATION_GW_TX || indicator == INDICATION_TX) ? "&#128994;" :
+				  (indicator == INDICATION_GW_RX || indicator == INDICATION_RX || indicator == INDICATION_ERR_TX) ? "&#128308;" : "&#128993;",
+				  "led");
 	}
 
 	if (!webDebugEnabled) {
@@ -1722,16 +2416,17 @@ void indication(const indication_t indicator)
 	{
 		mysIndication = "Unknown indication";
 	}
+	const SharedStatsSnapshot s = snapshotStats();
 
 	char msgbuf[192] = {'\0'};
 	if (snprintf(msgbuf, sizeof(msgbuf),
 				 "%s | gateway: rx: %lu - tx: %lu  | sensors: rx: %lu - tx: %lu  | err: %lu <br />",
 				 mysIndication,
-				 gatewayRxMessage,
-				 gatewayTxMessage,
-				 sensorRxMessage,
-				 sensorTxMessage,
-				 indicatorTxErrors) < 0)
+				 s.gatewayRxMessage,
+				 s.gatewayTxMessage,
+				 s.sensorRxMessage,
+				 s.sensorTxMessage,
+				 s.indicatorTxErrors) < 0)
 	{
 		strcpy(msgbuf, "<div class=\"error\">error</div>");
 	}
@@ -1742,11 +2437,11 @@ void indication(const indication_t indicator)
 			  "[INDICATION] code=%d | text=%s | gw(rx=%lu tx=%lu) sensor(rx=%lu tx=%lu) errors=%lu | wifi=%s (%d)",
 			  static_cast<int>(indicator),
 			  mysIndication,
-			  gatewayRxMessage,
-			  gatewayTxMessage,
-			  sensorRxMessage,
-			  sensorTxMessage,
-			  indicatorTxErrors,
+			  s.gatewayRxMessage,
+			  s.gatewayTxMessage,
+			  s.sensorRxMessage,
+			  s.sensorTxMessage,
+			  s.indicatorTxErrors,
 			  wifiStatusToString(WiFi.status()),
 			  static_cast<int>(WiFi.status()));
 }
@@ -1762,9 +2457,17 @@ void setup()
 	gResetReasonCode = getResetReasonCode();
 	captureResetReasonRaw();
 	applyTimeZone();
+#if WIFI_DISABLE_POWERSAVE
+	WiFi.setSleep(false);
+#endif
+	gatewayFsBegin();
+	loadWifiRepeaterBssidFromStorage();
+	loadWifiAuthFailBackoffFromStorage();
+	loadWifiAuthFailBackoffThresholdFromStorage();
+	loadBootLogMaxEntriesFromStorage();
 
 #ifdef MY_DEBUG
-	Serial.begin(9600);
+	Serial.begin(MY_BAUD_RATE);
 	while (!Serial)
 	{
 	} // Wait
@@ -1794,6 +2497,10 @@ void setup()
 #endif																  // NTP
 
 	setupWifiEventLogging();
+
+	if (!gStatsMutex) {
+		gStatsMutex = xSemaphoreCreateMutex();
+	}
 
 #ifdef WWW
 	setup_WebServer();
@@ -1835,6 +2542,25 @@ void setup()
 							 gLastRestartMarker,
 							 bootTimeSynced);
 #endif
+
+	// start main loop task on core 0 with higher priority than default
+	// to ensure responsive handling of WiFi and other events
+	// stack size is set to 12KB to accommodate potential needs of OTA
+	// and web server handling
+	// pinning to core 0 allows core 1 to be more available for background tasks
+	// and WiFi handling
+	// Note: if using MY_CORE_ONLY, the main loop runs on the default core
+	// and this task is not created
+	// The main loop task will yield to other tasks as needed, so it should not starve them
+	// The main loop task will also handle the main MySensors loop and related processing
+	// This setup allows for better multitasking and responsiveness while maintaining the main loop's functionality
+	xTaskCreatePinnedToCore(taskSystemCore,
+						  "GatewaySystemCore",
+						  12288,
+						  nullptr,
+						  1,
+						  &gSystemTaskHandle,
+						  0);
 }
 //---------------------------------------------------------------------
 #pragma endregion
@@ -1844,8 +2570,11 @@ void setup()
 #pragma region MySensors loop
 //////////////////////////////////////////////////////////////////////////////////////////////////
 //
-void loop()
+static void loopSystemCore()
 {
+	beatSystemTask();
+	checkTaskHealthWatchdog();
+
 	avgCpuDelta = getCpuDelta();
 #ifdef WWW
 	const bool webDebugOn = isWebDebugEnabled();
@@ -1858,10 +2587,7 @@ void loop()
 	delay(10); // https://github.com/espressif/esp-idf/issues/1021
 	yield();
 
-	if (WiFi.status() != WL_CONNECTED)
-	{
-		loop_Wifi();
-	}
+	loop_Wifi();
 
 #ifdef WWW
 	loop_WebServer();
@@ -1919,7 +2645,7 @@ void loop()
 			ArduinoOTA.handle(); // throttled handling
 		}
 	}
-#endif					 // OTA
+#endif // OTA
 
 	if (!bootTimeSynced && isTimeSane())
 	{
@@ -1944,6 +2670,7 @@ void loop()
 	{
 		prev_time = millis();
 		yield();
+		const SharedStatsSnapshot stats = snapshotStats();
 #ifdef WWW
 		updateHealthSnapshot(bootCount,
 							 lastBootEpoch,
@@ -2002,12 +2729,12 @@ void loop()
 				getMaxFreeBlockBytes(),
 				WiFi.RSSI(),
 				wifiStatusToString(WiFi.status()),
-				lastIndicatorCode,
-				gatewayRxMessage,
-				gatewayTxMessage,
-				sensorRxMessage,
-				sensorTxMessage,
-				indicatorTxErrors,
+				stats.lastIndicatorCode,
+				stats.gatewayRxMessage,
+				stats.gatewayTxMessage,
+				stats.sensorRxMessage,
+				stats.sensorTxMessage,
+				stats.indicatorTxErrors,
 				controllerUp,
 				controllerType);
 			send_Event(telem, "telemetry");
@@ -2027,17 +2754,29 @@ void loop()
 					  ESP.getFreeHeap(),
 					  getHeapFragmentationPct(),
 					  getMaxFreeBlockBytes(),
-					  lastIndicatorCode,
-					  (lastIndicatorMs == 0 ? 0UL : millis() - lastIndicatorMs));
+					  stats.lastIndicatorCode,
+					  (stats.lastIndicatorMs == 0 ? 0UL : millis() - stats.lastIndicatorMs));
 		}
 
 		static unsigned long lastInfoSendMs = 0;
-		if (webLiveUiOn && millis() - lastInfoSendMs >= 5000UL) {
+		if (/*webLiveUiOn && */millis() - lastInfoSendMs >= 1000UL) {
 			lastInfoSendMs = millis();
 			updateWebStats();
 		}
 
 	}
+
+}
+
+static void loopMySensorsCore()
+{
+	beatMySensorsTask();
+
+#ifdef WWW
+	const bool webDebugOn = isWebDebugEnabled();
+#else
+	const bool webDebugOn = false;
+#endif
 
 	// interval based jobs
 	if (millis() - gw_send_prev_time > gw_send_interval)
@@ -2053,6 +2792,23 @@ void loop()
 			send_Event(arc, "debug");
 		}
 	}
+
+	delay(2);
+	yield();
+}
+
+static void taskSystemCore(void *pvParameters)
+{
+	(void)pvParameters;
+	for (;;) {
+		loopSystemCore();
+		vTaskDelay(pdMS_TO_TICKS(2));
+	}
+}
+
+void loop()
+{
+	loopMySensorsCore();
 }
 //---------------------------------------------------------------------
 #pragma endregion

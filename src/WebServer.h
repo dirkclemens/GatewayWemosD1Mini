@@ -15,6 +15,15 @@ void setOtaRuntimeEnabled(bool enabled);
 uint32_t getOtaWindowRemainingSec();
 uint32_t getUiUpdateIntervalMs();
 bool setUiUpdateIntervalMs(uint32_t intervalMs);
+uint32_t getBootLogMaxEntries();
+bool setBootLogMaxEntries(uint32_t maxEntries);
+uint32_t getWifiAuthFailBackoffMs();
+bool setWifiAuthFailBackoffMs(uint32_t backoffMs);
+uint32_t getWifiAuthFailBackoffThreshold();
+bool setWifiAuthFailBackoffThreshold(uint32_t threshold);
+bool setWifiRepeaterBssid(const String &bssid);
+const char *getWifiRepeaterBssid();
+bool isWifiRepeaterBssidLocked();
 const char *getNodeNameById(uint8_t nodeId);
 void registerPresentedSensor(uint8_t nodeId, uint8_t sensorId);
 bool updateSensorStateCache(uint8_t nodeId,

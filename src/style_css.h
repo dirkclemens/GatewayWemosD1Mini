@@ -168,6 +168,36 @@ main { padding-top: calc(var(--nav-h) + 10px); }
     text-align: center;
     justify-content: center;
 }
+.info-status-line {
+    width: 100%;
+    // max-width: 920px;
+    display: flex;
+    justify-content: left;
+    align-items: left;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin: 4px 10px 10px;
+}
+.info-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+}
+.info-chip .k {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+}
+.info-chip .v {
+    font-size: 12px;
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
 #infoContent table { width: 100%; max-width: 620px; border-collapse: collapse; }
 #page-info #infoContent table,
 #page-info #gwClientsContent table { margin: 0 auto; }

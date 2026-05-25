@@ -1,11 +1,11 @@
-# Projektdokumentation: GatewayWemosD1Mini2026
+# Projektdokumentation: GatewayESP32
 
 ## 1. Projektüberblick
 
-`GatewayWemosD1Mini2026` ist ein MySensors-WLAN-Gateway für ESP8266 (Wemos D1 mini/D1 mini Pro) und optional ESP32, das RF24-Funksensordaten ins IP-Netz überführt und eine lokale Betriebs-/Diagnoseoberfläche bereitstellt.
+`GatewayESP32` ist ein MySensors-WLAN-Gateway für ESP32, das RF24-Funksensordaten ins IP-Netz überführt und eine lokale Betriebs-/Diagnoseoberfläche bereitstellt.
 
 Hauptfunktionen:
-- MySensors Gateway (ESP8266/ESP32, RF24)
+- MySensors Gateway (ESP32, RF24)
 - Web-Oberfläche mit Server-Sent Events (Live-Updates)
 - Telnet-Ausgabe für Live-Logs
 - OTA-Update-Unterstützung
@@ -17,18 +17,14 @@ Hauptfunktionen:
 ## 2. Hardware- und Software-Basis
 
 - MCU:
-  - ESP8266 (80 MHz)
   - ESP32 (bei aktivem Build-Flag `USE_ESP32`)
 - Zielboards:
-  - `d1_mini` (4 MB Flash)
-  - `d1_mini_pro` (16 MB Flash)
-  - `esp32dev` (Environment `esp32_devkitc_serial` / `esp32_devkitc_ota`)
+  - `esp32dev` (Environment-Familie `esp32_devkitc_*`)
 - Funk: nRF24L01+ über `MY_RADIO_RF24`
 - Framework: Arduino
 - Buildsystem: PlatformIO
 
-Wichtige Plattformbindungen:
-- ESP8266: `espressif8266@2.6.2` (kompatibilitätskritisch)
+Wichtige Plattformbindung:
 - ESP32: `espressif32@6.10.0`
 
 ## 3. Build- und Deployment-Konfiguration
@@ -36,22 +32,23 @@ Wichtige Plattformbindungen:
 Datei: `platformio.ini`
 
 ### 3.1 Umgebungen
-- `d1_mini_ota` (Default)
-- `d1_mini_serial`
-- `d1_mini_pro_serial`
-- `esp32_devkitc_serial`
-- `esp32_devkitc_ota`
+- `esp32_devkitc_serial_release` (Default)
+- `esp32_devkitc_serial_debug`
+- `esp32_devkitc_ota_release`
+- `esp32_devkitc_ota_debug`
+- Kompatibilitäts-Aliase:
+  - `esp32_devkitc_serial` -> `esp32_devkitc_serial_release`
+  - `esp32_devkitc_ota` -> `esp32_devkitc_ota_release`
 
 ### 3.2 Relevante Einstellungen
 - Dateisystem: `LittleFS`
-- Linkerscript (4 MB): `eagle.flash.4m1m.ld`
+- `build_type`: `release` und `debug` getrennt je Profil
 - Bibliotheken:
   - `MySensors@>=2.3.2`
-  - `ESPAsyncTCP`
+  - `AsyncTCP`
   - `ESP Async WebServer`
-- Monitor-Baudrate:
-  - OTA-Env: `115200`
-  - Serial-Env: `9600` (passend zu `MY_BAUD_RATE 9600`)
+- Monitor-Baudrate: `115200`
+- `MQTT_MAX_PACKET_SIZE`: `512`
 
 ### 3.3 OTA
 - OTA ist per Makro aktiv (`OTA` in `src/config.h`)
@@ -148,7 +145,7 @@ WLAN-Recovery-Strategie:
 ## 7. MySensors-Integration
 
 ### 7.1 Gateway-Modus
-- Standard: `MY_GATEWAY_ESP8266`
+- Standard: `MY_GATEWAY_ESP32`
 - Optional (kommentiert): MQTT-Gateway (`WITH_MQTT`)
 
 ### 7.2 Netzwerk
@@ -281,13 +278,12 @@ Regelmäßig publiziert:
 
 ## 13. Betriebshinweise
 
-- Für stabile Kompatibilität mit diesem Code ist die fixierte ESP8266-Plattformversion wichtig (`2.6.2`).
 - Das Projekt ist stark compile-time-gesteuert (Makros). Änderungen an Features erfolgen primär über `src/config.h` und MySensors-Makros in `src/main.cpp`.
 - Die Weboberfläche ist vollständig eingebettet (PROGMEM) und benötigt keine externen Webdateien zur Laufzeit.
 
 ## 14. Bekannte technische Auffälligkeiten
 
-- Das Projekt unterstützt zwei Zielplattformen (ESP8266/ESP32). Nicht jedes Feature ist auf beiden Plattformen identisch tief instrumentiert.
+- Das Projekt unterstützt derzeit ESP32-Zielplattformen mit getrennten Debug-/Release-Profilen (`esp32_devkitc_serial_*`, `esp32_devkitc_ota_*`).
 - Bei sehr großer Info-/Debug-Ausgabe kann die UI-Last steigen; daher sind Live-Updates und Debug einzeln schaltbar.
 - Einige Texte sind gemischt Deutsch/Englisch; für Teamwartung wäre einheitliche Sprache sinnvoll.
 
